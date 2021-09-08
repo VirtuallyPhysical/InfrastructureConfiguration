@@ -1,8 +1,6 @@
 function ConfigureSyslog {
 
 Write-Host
-
-#Options
 $syslogrestart = Read-Host " Restart Syslog first? y/n"
 Write-Host
 Start-Sleep -Second 1
@@ -11,27 +9,23 @@ write-host
 write-host " Syslog server format   UDP://X.X.X.X" -ForegroundColor Yellow
 $SyslogServer = Read-Host " Please enter syslog server"
 
-
 $GlobalSysLogConfig = @()
 
 ForEach ($esxhost in (Get-Content $txtlocation))
 {
 if((Get-VMHost $esxhost | Get-VMHostSysLogServer).Host -notcontains "$SyslogServer"){
-
-		#Restart Syslog prior to configuration
          if($syslogrestart -eq "y"){
             $esxcli = Get-EsxCLI -VMhost $esxhost
             $esxcli.system.syslog.reload()}
 
          $EsxSysLogConfig = "" | select Host, ExistingConfig, NewConfig, Time, Change
-
-		#Pull Existing Config
          Write-Host ".... Writing existing configuration of host $esxhost to log" -ForegroundColor Green
          $EsxSysLogConfig.Host = (Get-VMHost $esxhost).Name
-         $EsxSysLogConfig.ExistingConfig = Get-VMHostSysLogServer -VMhost $esxhost
+         $EsxSysLogConfig.ExistingConfig = ((Get-VMHostSysLogServer -VMhost $esxhost) -join ',')
          $EsxSysLogConfig.Time = $(get-date -f yyyy-MM-dd-hhmm)
 
-		#Write New Config
+         #$CombineConfig = $EsxSysLogConfig.ExistingConfig +$SyslogServer
+
          Write-Host ".... Adding $SyslogServer to configuration on host $esxhost" -ForegroundColor Green
          Set-VMHostSysLogServer -VMhost $esxhost -SysLogServer $EsxSysLogConfig.ExistingConfig,$SyslogServer":"514 -Confirm:$false
          $EsxSysLogConfig.NewConfig = ((Get-VMHostSysLogServer -VMhost $esxhost) -join ',')
@@ -40,23 +34,16 @@ if((Get-VMHost $esxhost | Get-VMHostSysLogServer).Host -notcontains "$SyslogServ
 }
 
 else{
-
-		Get-VMHost $host | Get-VMHostSysLogServer | export-csv -path ".\Syslog Config.csv" -append
-		Write-Host "$esxhost is already configured with $SyslogServer, moving on..." -ForegroundColor Red
-		Start-Sleep -Second 1
-
-		$EsxSysLogConfig.Host = (Get-VMHost $esxhost ).Name
-		$EsxSysLogConfig.ExistingConfig = (Get-VMHost $esxhost | Get-VMHostSysLogServer)
-		$EsxSysLogConfig.Time = $(get-date -f yyyy-MM-dd-hhmm)
-		$EsxSysLogConfig.Change = "No Change"
-
-		$GlobalSysLogConfig += $EsxSysLogConfig
-
+    Get-VMHost $esxhost | Get-VMHostSysLogServer | export-csv -path ".\Syslog Config.csv" -append
+    Write-Host "$esxhost is already configured with $SyslogServer, moving on..." -ForegroundColor Red
+       Start-Sleep -Second 1
+	$EsxSysLogConfig = "" | select Host, ExistingConfig, NewConfig, Time, Change
+    $EsxSysLogConfig.Host = (Get-VMHost $esxhost ).Name
+    $EsxSysLogConfig.ExistingConfig = (Get-VMHost $esxhost | Get-VMHostSysLogServer)
+    $EsxSysLogConfig.Time = $(get-date -f yyyy-MM-dd-hhmm)
+    $EsxSysLogConfig.Change = "No Change"
+    $GlobalSysLogConfig += $EsxSysLogConfig
      }
-
-$GlobalSysLogConfig | Export-CSV -path ".\Syslog $(get-date -f yyyy-MM-dd-hhmm).csv"
-
-}
 }
 
 
