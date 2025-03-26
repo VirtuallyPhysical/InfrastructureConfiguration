@@ -22,11 +22,14 @@ foreach ($Share in $Shares) {
 
     # Create the share if it doesn't exist
     if (!(Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name $ShareName -Path $SharePath -FullAccess $AdminGroup -ChangeAccess "Authenticated Users"
+        New-SmbShare -Name $ShareName -Path $SharePath -FullAccess $AdminGroup 
+	Grant-SmbShareAccess -Name $ShareName -AccountName $UserGroup -AccessRight Read -Force
+        # Remove Everyone if it exists
+        Revoke-SmbShareAccess -Name $ShareName -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
         Write-Host "Created SMB Share: $ShareName"
     } else {
         Write-Host "SMB Share $ShareName already exists. Updating permissions..."
-        Grant-SmbShareAccess -Name $ShareName -AccountName "Authenticated Users" -AccessRight Change -Force
+        Grant-SmbShareAccess -Name $ShareName -AccountName $UserGroup -AccessRight Read -Force
         Grant-SmbShareAccess -Name $ShareName -AccountName $AdminGroup -AccessRight Full -Force
         # Remove Everyone if it exists
         Revoke-SmbShareAccess -Name $ShareName -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
@@ -40,12 +43,36 @@ foreach ($Share in $Shares) {
     $Acl.SetAccessRuleProtection($True, $False)  # Disable inheritance, do not copy existing permissions
     Set-Acl -Path $SharePath -AclObject $Acl
 
-    # Define NTFS permissions
+    # Define NTFS permissions using the proper enum types
     $Permissions = @(
-        New-Object System.Security.AccessControl.FileSystemAccessRule($AdminGroup, "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"),
-        New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit, ObjectInherit", "None", "Allow"),
-        New-Object System.Security.AccessControl.FileSystemAccessRule($UserGroup, "ReadAndExecute", "None", "None", "Allow"),
-        New-Object System.Security.AccessControl.FileSystemAccessRule("CREATOR OWNER", "FullControl", "ContainerInherit, ObjectInherit", "InheritOnly", "Allow")
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $AdminGroup,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ),
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            "SYSTEM",
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ),
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $UserGroup,
+            [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            [System.Security.AccessControl.InheritanceFlags]::None,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        ),
+        [System.Security.AccessControl.FileSystemAccessRule]::new(
+            "CREATOR OWNER",
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+            [System.Security.AccessControl.PropagationFlags]::InheritOnly,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
     )
 
     # Apply new permissions
