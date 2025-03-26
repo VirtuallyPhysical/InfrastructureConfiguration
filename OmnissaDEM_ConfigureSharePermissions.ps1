@@ -1,16 +1,18 @@
-# Define shares and their paths
-$Shares = @(
-    @{ Name = "Profiles"; Path = "C:\Profiles" },
-    @{ Name = "Configuration"; Path = "C:\Configuration" }
-)
-
-# Define security groups
-$AdminGroup = "DOMAIN\RoamingProfiles_Admins"
-$UserGroup = "DOMAIN\RoamingProfiles_Users"
-
-foreach ($Share in $Shares) {
-    $ShareName = $Share.Name
-    $SharePath = $Share.Path
+function Set-SharePermissions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ShareName,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$SharePath,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$AdminGroup,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$UserGroup
+    )
 
     Write-Host "Processing share: $ShareName at $SharePath"
 
@@ -20,10 +22,11 @@ foreach ($Share in $Shares) {
         Write-Host "Created folder: $SharePath"
     }
 
-    # Create the share if it doesn't exist
+    # Create the share if it doesn't exist, otherwise update permissions
     if (!(Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue)) {
-        New-SmbShare -Name $ShareName -Path $SharePath -FullAccess $AdminGroup 
-	Grant-SmbShareAccess -Name $ShareName -AccountName $UserGroup -AccessRight Read -Force
+        New-SmbShare -Name $ShareName -Path $SharePath -FullAccess $AdminGroup `
+            -ErrorAction Stop
+        Grant-SmbShareAccess -Name $ShareName -AccountName $UserGroup -AccessRight Read -Force
         # Remove Everyone if it exists
         Revoke-SmbShareAccess -Name $ShareName -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
         Write-Host "Created SMB Share: $ShareName"
@@ -39,11 +42,11 @@ foreach ($Share in $Shares) {
     Write-Host "Configuring NTFS permissions for $SharePath..."
     $Acl = Get-Acl -Path $SharePath
 
-    # Remove inheritance (optional but recommended)
-    $Acl.SetAccessRuleProtection($True, $False)  # Disable inheritance, do not copy existing permissions
+    # Disable inheritance (do not copy existing permissions)
+    $Acl.SetAccessRuleProtection($True, $False)
     Set-Acl -Path $SharePath -AclObject $Acl
 
-    # Define NTFS permissions using the proper enum types
+    # Define NTFS permissions using the proper .NET enum values
     $Permissions = @(
         [System.Security.AccessControl.FileSystemAccessRule]::new(
             $AdminGroup,
@@ -75,15 +78,18 @@ foreach ($Share in $Shares) {
         )
     )
 
-    # Apply new permissions
+    # Apply the new NTFS permissions
     foreach ($Permission in $Permissions) {
         $Acl.AddAccessRule($Permission)
     }
 
-    # Save NTFS changes
     Set-Acl -Path $SharePath -AclObject $Acl
 
     Write-Host "Permissions configured successfully for $ShareName."
 }
 
-Write-Host "All shares processed successfully."
+# Share 1: AdminGroup gets FullAccess, UserGroup gets Read
+Set-SharePermissions -ShareName "Share1" -SharePath "C:\Test\Share1" -AdminGroup "home.local\TestAdmin" -UserGroup "home.local\TestUser"
+
+# Share 2: AdminGroup gets FullAccess, but a different user group gets Read
+Set-SharePermissions -ShareName "Share2" -SharePath "C:\Test\Share2" -AdminGroup "home.local\TestAdmin" -UserGroup "home.local\TestUser2"
