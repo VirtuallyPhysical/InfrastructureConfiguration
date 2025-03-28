@@ -1,0 +1,94 @@
+# Define variables
+$certTemplate = "WebServer"  # Adjust based on your environment
+$certSharePath = "\\server\certshare"  # Adjust this path
+$certStoreLocation = "Cert:\LocalMachine\My"
+
+function Show-Menu {
+    Clear-Host
+    Write-Host "Choose an option:"
+    Write-Host "1. Request SSL certificate"
+    Write-Host "2. Install certificate from share"
+    Write-Host "Q. Quit"
+}
+
+function Request-Certificate {
+    $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+    $commonName = Read-Host "Enter Common Name (e.g., load-balanced DNS name)"
+    $sanList = @()
+
+    # Ask for 3 Load Balanced SANs
+    for ($i = 1; $i -le 3; $i++) {
+        $san = Read-Host "Enter DNS Alternative Name $i"
+        $sanList += $san
+    }
+
+    $sanList += $fqdn
+
+    $sanString = ($sanList | ForEach-Object { "dns=$_"} ) -join "&"
+
+    $infFile = @"
+[Version]
+Signature="$Windows NT$"
+
+[NewRequest]
+Subject = "CN=$commonName"
+KeySpec = 1
+KeyLength = 2048
+Exportable = TRUE
+MachineKeySet = TRUE
+SMIME = FALSE
+PrivateKeyArchive = FALSE
+UserProtected = FALSE
+UseExistingKeySet = FALSE
+ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
+ProviderType = 12
+RequestType = CMC
+KeyUsage = 0xa0
+
+[Extensions]
+2.5.29.17 = "{text}"
+_continue_ = "$sanString"
+
+[RequestAttributes]
+CertificateTemplate = $certTemplate
+"@ 
+
+    $infPath = "$env:TEMP\certrequest.inf"
+    $reqPath = "$env:TEMP\certrequest.req"
+
+    $infFile | Out-File -Encoding ascii -FilePath $infPath
+
+    certreq -new $infPath $reqPath
+    certreq -submit $reqPath
+
+    $continue = Read-Host "Do you want to run step 2 (Install cert from share)? (Y/N)"
+    if ($continue -match "^[Yy]") {
+        Install-Certificate
+    }
+}
+
+function Install-Certificate {
+    $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+    $certFile = Join-Path $certSharePath "$fqdn.cer"
+
+    if (Test-Path $certFile) {
+        certutil -addstore -f "MY" $certFile
+        Write-Host "Certificate installed successfully to LocalMachine\My."
+    } else {
+        Write-Host "Certificate file not found: $certFile"
+    }
+}
+
+do {
+    Show-Menu
+    $choice = Read-Host "Enter your choice"
+
+    switch ($choice) {
+        "1" { Request-Certificate }
+        "2" { Install-Certificate }
+        "Q" { break }
+        default { Write-Host "Invalid choice. Try again." }
+    }
+
+    Pause
+} while ($true)
