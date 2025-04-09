@@ -3,7 +3,7 @@ $ExpectedDNS = @("192.168.1.10", "192.168.1.11")
 $ExpectedCDriveSizeGB = 60
 $MinFreeSpacePercent = 20
 
-$OutputPath = "C:\UAT_Results.csv"
+$OutputPath = "C:\Users\%username%\Desktop\UAT_Results.csv"
 $Results = @()
 
 function Add-Result {
