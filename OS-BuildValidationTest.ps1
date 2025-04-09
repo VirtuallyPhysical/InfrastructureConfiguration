@@ -2,211 +2,211 @@
 # UAT Script for Windows Server 2022
 # ===============================
 
-# Define expected values (update these as required)
+# --- Define expected values ---
 $ExpectedDNS = @("192.168.1.10", "192.168.1.11")
 $ExpectedCDriveSizeGB = 60
 $MinFreeSpacePercent = 20
+$OutputPath = "$env:USERPROFILE\Desktop\UAT_Results_$env:USERNAME.csv"
 
-# Output path set to current user's Desktop
-$Username = $env:USERNAME
-$OutputPath = "$env:USERPROFILE\Desktop\UAT_Results_$Username.csv"
-
-# Create a list to store test results
-$Results = @()
-
+# --- Helper to record results ---
 function Add-Result {
     param (
+        [ref]$Results,
         [string]$Name,
         [string]$Result
     )
-    $Results += [PSCustomObject]@{
+    $Results.Value += [PSCustomObject]@{
         'Test Name' = $Name
         'Result'    = $Result
     }
 }
 
+# --- UAT Checks ---
 function Check-DNSConfig {
+    param ($ExpectedDNS, [ref]$Results)
     try {
         $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses -Unique
         $diff = Compare-Object -ReferenceObject $ExpectedDNS -DifferenceObject $dns
         if ($diff) {
-            Add-Result "DNS Configuration" "FAIL - Found: $($dns -join ', ')"
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Found: $($dns -join ', ')"
         } else {
-            Add-Result "DNS Configuration" "PASS"
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS"
         }
     } catch {
-        Add-Result "DNS Configuration" "ERROR - $_"
+        Add-Result -Results $Results -Name "DNS Configuration" -Result "ERROR - $_"
     }
 }
 
 function Check-CDrive {
+    param ($ExpectedSize, $MinFreePercent, [ref]$Results)
     try {
         $drive = Get-PSDrive -Name C
         $totalGB = [math]::Round(($drive.Used + $drive.Free) / 1GB)
         $freePercent = ($drive.Free / ($drive.Used + $drive.Free)) * 100
 
-        if ($totalGB -ne $ExpectedCDriveSizeGB) {
-            Add-Result "C: Drive Size" "FAIL - Found $totalGB GB"
-        } elseif ($freePercent -lt $MinFreeSpacePercent) {
-            Add-Result "C: Drive Free Space" "FAIL - Only $([math]::Round($freePercent,2))% free"
+        if ($totalGB -ne $ExpectedSize) {
+            Add-Result -Results $Results -Name "C: Drive Size" -Result "FAIL - Found $totalGB GB"
+        } elseif ($freePercent -lt $MinFreePercent) {
+            Add-Result -Results $Results -Name "C: Drive Free Space" -Result "FAIL - Only $([math]::Round($freePercent,2))% free"
         } else {
-            Add-Result "C: Drive Check" "PASS"
+            Add-Result -Results $Results -Name "C: Drive Check" -Result "PASS"
         }
     } catch {
-        Add-Result "C: Drive Check" "ERROR - $_"
+        Add-Result -Results $Results -Name "C: Drive Check" -Result "ERROR - $_"
     }
 }
 
 function Check-SyslogSetup {
+    param ([ref]$Results)
     try {
         $logInsight = Get-Service -Name "VMwareLogCollector" -ErrorAction SilentlyContinue
         if ($logInsight) {
-            Add-Result "Aria Log Insight Agent" "PASS - Installed"
+            Add-Result -Results $Results -Name "Aria Log Insight Agent" -Result "PASS - Installed"
         } else {
-            Add-Result "Aria Log Insight Agent" "FAIL - Not Installed"
+            Add-Result -Results $Results -Name "Aria Log Insight Agent" -Result "FAIL - Not Installed"
         }
 
         $eventForwarding = wevtutil gl "ForwardedEvents" 2>&1
-        Add-Result "Syslog Setup (ForwardedEvents)" ($eventForwarding | Out-String).Trim()
+        Add-Result -Results $Results -Name "Syslog Setup (ForwardedEvents)" -Result ($eventForwarding | Out-String).Trim()
     } catch {
-        Add-Result "Syslog Setup" "ERROR - $_"
+        Add-Result -Results $Results -Name "Syslog Setup" -Result "ERROR - $_"
     }
 }
 
 function Check-Network {
+    param ([ref]$Results)
     try {
         $adapters = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -ne $null }
         foreach ($adapter in $adapters) {
             $ip = $adapter.IPv4Address.IPAddress
             $subnet = $adapter.IPv4Address.PrefixLength
             $gateway = $adapter.IPv4DefaultGateway.NextHop
-            Add-Result "IP/Subnet/Gateway" "$ip/$subnet via $gateway"
+            Add-Result -Results $Results -Name "IP/Subnet/Gateway" -Result "$ip/$subnet via $gateway"
 
             $ping = Test-Connection -ComputerName $gateway -Count 1 -Quiet
-            if ($ping) {
-                Add-Result "Gateway Ping Test" "PASS"
-            } else {
-                Add-Result "Gateway Ping Test" "FAIL - No response from $gateway"
-            }
+            $pingResult = if ($ping) { "PASS" } else { "FAIL - No response from $gateway" }
+            Add-Result -Results $Results -Name "Gateway Ping Test" -Result $pingResult
         }
     } catch {
-        Add-Result "Network Check" "ERROR - $_"
+        Add-Result -Results $Results -Name "Network Check" -Result "ERROR - $_"
     }
 }
 
 function Check-GPOs {
+    param ([ref]$Results)
     try {
         $gpos = gpresult /r /scope:computer 2>&1
-        Add-Result "Applied GPOs" ($gpos | Out-String).Trim()
+        Add-Result -Results $Results -Name "Applied GPOs" -Result ($gpos | Out-String).Trim()
     } catch {
-        Add-Result "Applied GPOs" "ERROR - $_"
+        Add-Result -Results $Results -Name "Applied GPOs" -Result "ERROR - $_"
     }
 }
 
 function Check-AdminGroup {
+    param ([ref]$Results)
     try {
         $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
         $adminNames = $admins.Name -join ", "
-        Add-Result "Local Admin Group Members" $adminNames
+        Add-Result -Results $Results -Name "Local Admin Group Members" -Result $adminNames
     } catch {
-        Add-Result "Local Admin Group Members" "ERROR - $_"
+        Add-Result -Results $Results -Name "Local Admin Group Members" -Result "ERROR - $_"
     }
 }
 
 function Check-GuestAccount {
+    param ([ref]$Results)
     try {
         $guest = Get-LocalUser -Name "Guest"
-        if ($guest.Enabled) {
-            Add-Result "Guest Account Status" "FAIL - Enabled"
-        } else {
-            Add-Result "Guest Account Status" "PASS - Disabled"
-        }
+        $result = if ($guest.Enabled) { "FAIL - Enabled" } else { "PASS - Disabled" }
+        Add-Result -Results $Results -Name "Guest Account Status" -Result $result
     } catch {
-        Add-Result "Guest Account Status" "ERROR - $_"
+        Add-Result -Results $Results -Name "Guest Account Status" -Result "ERROR - $_"
     }
 }
 
 function Check-WindowsServices {
+    param ([ref]$Results)
     try {
         $services = Get-Service | Where-Object { $_.Status -eq "Running" }
-        $serviceSummary = $services | Select-Object StartType, Status, Name, DisplayName | Out-String
-        Add-Result "Running Services" $serviceSummary.Trim()
+        $summary = $services | Select-Object StartType, Status, Name, DisplayName | Out-String
+        Add-Result -Results $Results -Name "Running Services" -Result $summary.Trim()
     } catch {
-        Add-Result "Running Services" "ERROR - $_"
+        Add-Result -Results $Results -Name "Running Services" -Result "ERROR - $_"
     }
 }
 
 function Check-RDP {
+    param ([ref]$Results)
     try {
         $rdpStatus = Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections"
-        if ($rdpStatus.fDenyTSConnections -eq 0) {
-            Add-Result "Remote Desktop Enabled" "PASS"
-        } else {
-            Add-Result "Remote Desktop Enabled" "FAIL - Disabled"
-        }
+        $enabled = if ($rdpStatus.fDenyTSConnections -eq 0) { "PASS" } else { "FAIL - Disabled" }
+        Add-Result -Results $Results -Name "Remote Desktop Enabled" -Result $enabled
 
         $rdpUsers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue
-        if ($rdpUsers) {
-            $names = $rdpUsers.Name -join ", "
-            Add-Result "RDP Group Members" $names
-        } else {
-            Add-Result "RDP Group Members" "No members found or group does not exist"
-        }
+        $rdpNames = if ($rdpUsers) { $rdpUsers.Name -join ", " } else { "No members found or group missing" }
+        Add-Result -Results $Results -Name "RDP Group Members" -Result $rdpNames
     } catch {
-        Add-Result "Remote Desktop Settings" "ERROR - $_"
+        Add-Result -Results $Results -Name "Remote Desktop Settings" -Result "ERROR - $_"
     }
 }
 
 function Check-WindowsUpdates {
+    param ([ref]$Results)
     try {
         $updates = Get-HotFix | Sort-Object -Property InstalledOn -Descending | Select-Object -First 5
-        Add-Result "Recent Updates" ($updates | Out-String).Trim()
+        Add-Result -Results $Results -Name "Recent Updates" -Result ($updates | Out-String).Trim()
     } catch {
-        Add-Result "Recent Updates" "ERROR - $_"
+        Add-Result -Results $Results -Name "Recent Updates" -Result "ERROR - $_"
     }
 }
 
 function Run-WindowsDefenderScan {
+    param ([ref]$Results)
     try {
         Start-MpScan -ScanType QuickScan -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
         $lastScan = Get-MpComputerStatus | Select-Object -ExpandProperty AntivirusSignatureLastUpdated
-        Add-Result "Windows Defender Last Updated" "$lastScan"
-        Add-Result "Windows Defender Scan" "Scan triggered (Quick Scan)"
+        Add-Result -Results $Results -Name "Windows Defender Last Updated" -Result "$lastScan"
+        Add-Result -Results $Results -Name "Windows Defender Scan" -Result "Scan triggered (Quick Scan)"
     } catch {
-        Add-Result "Windows Defender Scan" "ERROR - $_"
+        Add-Result -Results $Results -Name "Windows Defender Scan" -Result "ERROR - $_"
     }
 }
 
 function Check-DomainJoin {
+    param ([ref]$Results)
     try {
         $cs = Get-CimInstance -Class Win32_ComputerSystem
         if ($cs.PartOfDomain) {
-            Add-Result "Domain Join" "PASS - Joined to $($cs.Domain)"
+            Add-Result -Results $Results -Name "Domain Join" -Result "PASS - Joined to $($cs.Domain)"
         } else {
-            Add-Result "Domain Join" "FAIL - Not domain joined (Workgroup: $($cs.Workgroup))"
+            Add-Result -Results $Results -Name "Domain Join" -Result "FAIL - Not domain joined (Workgroup: $($cs.Workgroup))"
         }
     } catch {
-        Add-Result "Domain Join" "ERROR - $_"
+        Add-Result -Results $Results -Name "Domain Join" -Result "ERROR - $_"
     }
 }
 
-# ==========================
-# Run all checks
-# ==========================
-Check-DNSConfig
-Check-CDrive
-Check-SyslogSetup
-Check-Network
-Check-GPOs
-Check-AdminGroup
-Check-GuestAccount
-Check-WindowsServices
-Check-RDP
-Check-WindowsUpdates
-Run-WindowsDefenderScan
-Check-DomainJoin
+# --- Final Runner ---
+function Run-UAT {
+    $Results = @()
 
-# Export results
-$Results | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
-Write-Host "UAT completed. Results saved to: $OutputPath"
+    Check-DNSConfig -ExpectedDNS $ExpectedDNS -Results ([ref]$Results)
+    Check-CDrive -ExpectedSize $ExpectedCDriveSizeGB -MinFreePercent $MinFreeSpacePercent -Results ([ref]$Results)
+    Check-SyslogSetup -Results ([ref]$Results)
+    Check-Network -Results ([ref]$Results)
+    Check-GPOs -Results ([ref]$Results)
+    Check-AdminGroup -Results ([ref]$Results)
+    Check-GuestAccount -Results ([ref]$Results)
+    Check-WindowsServices -Results ([ref]$Results)
+    Check-RDP -Results ([ref]$Results)
+    Check-WindowsUpdates -Results ([ref]$Results)
+    Run-WindowsDefenderScan -Results ([ref]$Results)
+    Check-DomainJoin -Results ([ref]$Results)
+
+    $Results | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+    Write-Host "UAT completed. Results saved to: $OutputPath"
+}
+
+# --- Run it ---
+Run-UAT
