@@ -180,8 +180,16 @@ function Check-RDP {
 function Check-WindowsUpdates {
     param ([ref]$Results)
     try {
-        $updates = Get-HotFix | Sort-Object -Property InstalledOn -Descending | Select-Object -First 5
-        Add-Result -Results $Results -Name "Recent Updates" -Result ($updates | Out-String).Trim()
+        $updates = Get-HotFix | Where-Object {
+            $_.InstalledOn -and ($_.InstalledOn -as [datetime])
+        } | Sort-Object {[datetime]$_.InstalledOn} -Descending | Select-Object -First 5
+
+        if ($updates) {
+            $summary = $updates | Select-Object Source, Description, HotFixID, InstalledBy, InstalledOn | Out-String
+            Add-Result -Results $Results -Name "Recent Updates" -Result $summary.Trim()
+        } else {
+            Add-Result -Results $Results -Name "Recent Updates" -Result "No updates with valid install dates found"
+        }
     } catch {
         Add-Result -Results $Results -Name "Recent Updates" -Result "ERROR - $_"
     }
