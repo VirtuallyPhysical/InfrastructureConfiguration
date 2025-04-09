@@ -41,20 +41,20 @@ function Check-CDrive {
     param ($ExpectedSize, $MinFreePercent, [ref]$Results)
     try {
         $drive = Get-PSDrive -Name C
-        $totalGB = [math]::Round(($drive.Used + $drive.Free) / 1GB)
-        $freePercent = ($drive.Free / ($drive.Used + $drive.Free)) * 100
+        $totalGB = [math]::Round(($drive.Used + $drive.Free) / 1GB, 2)
+        $freeGB = [math]::Round($drive.Free / 1GB, 2)
+        $freePercent = [math]::Round(($drive.Free / ($drive.Used + $drive.Free)) * 100, 2)
 
-        if ($totalGB -ne $ExpectedSize) {
-            Add-Result -Results $Results -Name "C: Drive Size" -Result "FAIL - Found $totalGB GB"
-        } elseif ($freePercent -lt $MinFreePercent) {
-            Add-Result -Results $Results -Name "C: Drive Free Space" -Result "FAIL - Only $([math]::Round($freePercent,2))% free"
+        if ($totalGB -ne $ExpectedSize -or $freePercent -lt $MinFreePercent) {
+            Add-Result -Results $Results -Name "C: Drive Check" -Result "FAIL - Total: $totalGB GB, Free: $freeGB GB ($freePercent%)"
         } else {
-            Add-Result -Results $Results -Name "C: Drive Check" -Result "PASS"
+            Add-Result -Results $Results -Name "C: Drive Check" -Result "PASS - Total: $totalGB GB, Free: $freeGB GB ($freePercent%)"
         }
     } catch {
         Add-Result -Results $Results -Name "C: Drive Check" -Result "ERROR - $_"
     }
 }
+
 
 function Check-SyslogSetup {
     param ([ref]$Results)
@@ -81,7 +81,9 @@ function Check-Network {
             $ip = $adapter.IPv4Address.IPAddress
             $subnet = $adapter.IPv4Address.PrefixLength
             $gateway = $adapter.IPv4DefaultGateway.NextHop
-            Add-Result -Results $Results -Name "IP/Subnet/Gateway" -Result "$ip/$subnet via $gateway"
+            $dnsServers = ($adapter.DNSServer.ServerAddresses -join ", ")
+
+            Add-Result -Results $Results -Name "IP/Subnet/Gateway/DNS" -Result "$ip/$subnet via $gateway | DNS: $dnsServers"
 
             $ping = Test-Connection -ComputerName $gateway -Count 1 -Quiet
             $pingResult = if ($ping) { "PASS" } else { "FAIL - No response from $gateway" }
@@ -95,8 +97,33 @@ function Check-Network {
 function Check-GPOs {
     param ([ref]$Results)
     try {
-        $gpos = gpresult /r /scope:computer 2>&1
-        Add-Result -Results $Results -Name "Applied GPOs" -Result ($gpos | Out-String).Trim()
+        $gpoOutput = gpresult /r /scope:computer 2>&1
+
+        # Extract applied GPO names
+        $gpoNames = $gpoOutput | Where-Object { $_ -match '^\s+([^\s].*?)\s*$' } |
+            Select-String -Pattern '^\s{2,}(?!The following GPOs).*' |
+            ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ -ne "" -and $_ -notmatch "The following|-----" }
+
+        if ($gpoNames) {
+            Add-Result -Results $Results -Name "Applied GPOs" -Result ($gpoNames -join ", ")
+        } else {
+            Add-Result -Results $Results -Name "Applied GPOs" -Result "None found"
+        }
+
+        # Get computer's domain group membership (machine context)
+        $computerName = $env:COMPUTERNAME + "$"
+        $groups = Get-ADComputer $computerName -Properties MemberOf |
+            Select-Object -ExpandProperty MemberOf -ErrorAction SilentlyContinue |
+            ForEach-Object { ($_ -split ',')[0] -replace '^CN=' } |
+            Sort-Object
+
+        if ($groups) {
+            Add-Result -Results $Results -Name "Computer Group Membership" -Result ($groups -join ", ")
+        } else {
+            Add-Result -Results $Results -Name "Computer Group Membership" -Result "Not found or insufficient privileges"
+        }
+
     } catch {
         Add-Result -Results $Results -Name "Applied GPOs" -Result "ERROR - $_"
     }
