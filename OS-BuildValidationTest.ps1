@@ -107,48 +107,60 @@ function Check-Network {
 }
 
 function Check-GPOs {
-    param ([ref]$Results)
+    param (
+        [ref]$Results,
+        [string[]]$ExpectedGPOs = @("Test1-GPO", "Test2-GPO")
+    )
+
     try {
         $gpoOutput = gpresult /r /scope:computer 2>&1
 
-        # Extract applied GPO names
-        $gpoNames = $gpoOutput | Where-Object { $_ -match '^\s+([^\s].*?)\s*$' } |
-            Select-String -Pattern '^\s{2,}(?!The following GPOs).*' |
-            ForEach-Object { $_.ToString().Trim() } |
-            Where-Object { $_ -ne "" -and $_ -notmatch "The following|-----" }
-
-        if ($gpoNames) {
-            Add-Result -Results $Results -Name "Applied GPOs" -Result ($gpoNames -join ", ")
-        } else {
-            Add-Result -Results $Results -Name "Applied GPOs" -Result "None found"
+        # Extract applied GPOs from the output
+        $appliedGPOs = @()
+        $start = $false
+        foreach ($line in $gpoOutput) {
+            if ($line -match "Applied Group Policy Objects") {
+                $start = $true
+                continue
+            }
+            if ($start -and ($line -match "^\S")) { break }  # Stop at next heading
+            if ($start -and $line.Trim()) {
+                $appliedGPOs += $line.Trim()
+            }
         }
 
-        # Get computer's domain group membership (machine context)
-        $computerName = $env:COMPUTERNAME + "$"
-        $groups = Get-ADComputer $computerName -Properties MemberOf |
-            Select-Object -ExpandProperty MemberOf -ErrorAction SilentlyContinue |
-            ForEach-Object { ($_ -split ',')[0] -replace '^CN=' } |
-            Sort-Object
+        $appliedList = $appliedGPOs -join ", "
+        Add-Result -Results $Results -Name "Applied GPOs" -Result $appliedList
 
-        if ($groups) {
-            Add-Result -Results $Results -Name "Computer Group Membership" -Result ($groups -join ", ")
+        # Check for expected GPOs
+        $missing = $ExpectedGPOs | Where-Object { $_ -notin $appliedGPOs }
+
+        if ($missing.Count -eq 0) {
+            Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied: $($ExpectedGPOs -join ', ')"
         } else {
-            Add-Result -Results $Results -Name "Computer Group Membership" -Result "Not found or insufficient privileges"
+            Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')"
         }
 
-    } catch {
-        Add-Result -Results $Results -Name "Applied GPOs" -Result "ERROR - $_"
-    }
-}
+        # Get computer group membership
+        $groupLines = $gpoOutput | Where-Object { $_ -match "The computer is a part of the following security groups" }
+        $groupStart = $false
+        $groups = @()
+        foreach ($line in $gpoOutput) {
+            if ($line -match "The computer is a part of the following security groups") {
+                $groupStart = $true
+                continue
+            }
+            if ($groupStart -and ($line -match "^\S")) { break }
+            if ($groupStart -and $line.Trim()) {
+                $groups += $line.Trim()
+            }
+        }
 
-function Check-AdminGroup {
-    param ([ref]$Results)
-    try {
-        $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
-        $adminNames = $admins.Name -join ", "
-        Add-Result -Results $Results -Name "Local Admin Group Members" -Result $adminNames
+        $groupResult = if ($groups) { $groups -join ", " } else { "None found" }
+        Add-Result -Results $Results -Name "Computer Group Membership" -Result $groupResult
+
     } catch {
-        Add-Result -Results $Results -Name "Local Admin Group Members" -Result "ERROR - $_"
+        Add-Result -Results $Results -Name "GPO Validation" -Result "ERROR - $_"
     }
 }
 
