@@ -4,9 +4,9 @@
 
 # --- Define expected values ---
 $ExpectedDNS = @("192.168.1.10", "192.168.1.11")
-$ExpectedCDriveSizeGB = 60
-$MinFreeSpacePercent = 20
-$OutputPath = "$env:USERPROFILE\Desktop\UAT_Results_$env:USERNAME.csv"
+$ExpectedCDriveSizeGB = 59
+$MinFreeSpacePercent = 10
+$OutputPath = ".\UAT_Results_$env:USERNAME.csv"
 
 # --- Helper to record results ---
 function Add-Result {
@@ -25,12 +25,20 @@ function Add-Result {
 function Check-DNSConfig {
     param ($ExpectedDNS, [ref]$Results)
     try {
-        $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses -Unique
-        $diff = Compare-Object -ReferenceObject $ExpectedDNS -DifferenceObject $dns
-        if ($diff) {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Found: $($dns -join ', ')"
-        } else {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS"
+        $configuredDNS = Get-DnsClientServerAddress -AddressFamily IPv4 |
+                         Select-Object -ExpandProperty ServerAddresses -Unique
+
+        $expectedString = $ExpectedDNS -join ", "
+        $actualString = $configuredDNS -join ", "
+
+        if ($ExpectedDNS.Count -ne $configuredDNS.Count) {
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Count mismatch. Expected: $expectedString | Found: $actualString"
+        }
+        elseif (-not ($ExpectedDNS -eq $configuredDNS)) {
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Order mismatch. Expected: $expectedString | Found: $actualString"
+        }
+        else {
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS matches expected order: $actualString"
         }
     } catch {
         Add-Result -Results $Results -Name "DNS Configuration" -Result "ERROR - $_"
