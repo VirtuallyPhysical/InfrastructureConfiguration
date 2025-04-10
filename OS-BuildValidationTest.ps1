@@ -166,11 +166,24 @@ function Check-GuestAccount {
 function Check-WindowsServices {
     param ([ref]$Results)
     try {
-        $services = Get-Service | Where-Object { $_.Status -eq "Running" }
-        $summary = $services | Select-Object StartType, Status, Name, DisplayName | Out-String
-        Add-Result -Results $Results -Name "Running Services" -Result $summary.Trim()
+        $allServices = Get-Service
+        $autoServices = $allServices | Where-Object { $_.StartType -eq 'Automatic' }
+        $stoppedAuto = $autoServices | Where-Object { $_.Status -ne 'Running' }
+
+        if ($stoppedAuto.Count -eq 0) {
+            Add-Result -Results $Results -Name "Windows Services Status" -Result "PASS - All automatic services are running"
+        } else {
+            $failedList = $stoppedAuto | Select-Object Name, DisplayName, Status | Out-String
+            Add-Result -Results $Results -Name "Windows Services Status" -Result "FAIL - Some automatic services are not running"
+            Add-Result -Results $Results -Name "Stopped Auto Services" -Result $failedList.Trim()
+        }
+
+        # Optional: Include all currently running services for info
+        $runningSummary = $allServices | Where-Object { $_.Status -eq "Running" } |
+                          Select-Object StartType, Status, Name, DisplayName | Out-String
+        Add-Result -Results $Results -Name "Running Services Summary" -Result $runningSummary.Trim()
     } catch {
-        Add-Result -Results $Results -Name "Running Services" -Result "ERROR - $_"
+        Add-Result -Results $Results -Name "Windows Services Status" -Result "ERROR - $_"
     }
 }
 
