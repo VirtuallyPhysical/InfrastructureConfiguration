@@ -247,6 +247,74 @@ function Check-DomainJoin {
     }
 }
 
+function Check-ResourceUsage {
+    param ([ref]$Results)
+
+    try {
+        # Sample interval: 1 sample every 60 seconds, for 60 minutes = 60 samples
+        $sampleCount = 60
+        $sampleInterval = 60
+
+        # Collect counters
+        $counters = @(
+            '\Processor(_Total)\% Processor Time',
+            '\Memory\% Committed Bytes In Use',
+            '\LogicalDisk(_Total)\Disk Read Bytes/sec',
+            '\LogicalDisk(_Total)\Disk Write Bytes/sec',
+            '\Network Interface(*)\Bytes Received/sec',
+            '\Network Interface(*)\Bytes Sent/sec'
+        )
+
+        $data = Get-Counter -Counter $counters -SampleInterval $sampleInterval -MaxSamples $sampleCount
+
+        # Helper to get average and peak for a given counter
+        function Get-AvgPeak {
+            param ($counterName)
+
+            $values = $data.CounterSamples |
+                Where-Object { $_.Path -like "*$counterName*" } |
+                Select-Object -ExpandProperty CookedValue
+
+            if ($values.Count -eq 0) {
+                return @{ Avg = 0; Peak = 0 }
+            }
+
+            return @{
+                Avg  = [math]::Round(($values | Measure-Object -Average).Average, 2)
+                Peak = [math]::Round(($values | Measure-Object -Maximum).Maximum, 2)
+            }
+        }
+
+        # Collect values
+        $cpu = Get-AvgPeak -counterName '% Processor Time'
+        $mem = Get-AvgPeak -counterName '% Committed Bytes In Use'
+        $diskRead = Get-AvgPeak -counterName 'Disk Read Bytes/sec'
+        $diskWrite = Get-AvgPeak -counterName 'Disk Write Bytes/sec'
+        $netIn = Get-AvgPeak -counterName 'Bytes Received/sec'
+        $netOut = Get-AvgPeak -counterName 'Bytes Sent/sec'
+
+        $cpuAvg = $cpu.Avg
+        $memAvg = $mem.Avg
+
+        $summary = @(
+            "CPU: Avg ${cpu.Avg}%, Peak ${cpu.Peak}%",
+            "Memory: Avg ${mem.Avg}%, Peak ${mem.Peak}%",
+            "Disk Read: Avg $([math]::Round($diskRead.Avg / 1KB,2)) KB/s, Peak $([math]::Round($diskRead.Peak / 1KB,2)) KB/s",
+            "Disk Write: Avg $([math]::Round($diskWrite.Avg / 1KB,2)) KB/s, Peak $([math]::Round($diskWrite.Peak / 1KB,2)) KB/s",
+            "Network In: Avg $([math]::Round($netIn.Avg / 1KB,2)) KB/s, Peak $([math]::Round($netIn.Peak / 1KB,2)) KB/s",
+            "Network Out: Avg $([math]::Round($netOut.Avg / 1KB,2)) KB/s, Peak $([math]::Round($netOut.Peak / 1KB,2)) KB/s"
+        ) -join " | "
+
+        if ($cpuAvg -gt 85 -or $memAvg -gt 85) {
+            Add-Result -Results $Results -Name "Resource Usage" -Result "FAIL - High CPU or Memory. $summary"
+        } else {
+            Add-Result -Results $Results -Name "Resource Usage" -Result "PASS - $summary"
+        }
+    } catch {
+        Add-Result -Results $Results -Name "Resource Usage" -Result "ERROR - $_"
+    }
+}
+
 # --- Final Runner ---
 function Run-UAT {
     $Results = @()
@@ -263,6 +331,7 @@ function Run-UAT {
     Check-WindowsUpdates -Results ([ref]$Results)
     Run-WindowsDefenderScan -Results ([ref]$Results)
     Check-DomainJoin -Results ([ref]$Results)
+    Check-ResourceUsage -Results ([ref]$Results)
 
     $Results | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
     Write-Host "UAT completed. Results saved to: $OutputPath"
