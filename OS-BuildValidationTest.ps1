@@ -45,16 +45,20 @@ function Check-CDrive {
         $freeGB = [math]::Round($drive.Free / 1GB, 2)
         $freePercent = [math]::Round(($drive.Free / ($drive.Used + $drive.Free)) * 100, 2)
 
-        if ($totalGB -ne $ExpectedSize -or $freePercent -lt $MinFreePercent) {
-            Add-Result -Results $Results -Name "C: Drive Check" -Result "FAIL - Total: $totalGB GB, Free: $freeGB GB ($freePercent%)"
+        $summary = "Size: ${totalGB}GB, Free: ${freeGB}GB (${freePercent}%)"
+
+        $sizeOK = ([math]::Abs($totalGB - $ExpectedSize) -le 1)
+        $spaceOK = ($freePercent -ge $MinFreePercent)
+
+        if ($sizeOK -and $spaceOK) {
+            Add-Result -Results $Results -Name "C: Drive Check" -Result "PASS - $summary"
         } else {
-            Add-Result -Results $Results -Name "C: Drive Check" -Result "PASS - Total: $totalGB GB, Free: $freeGB GB ($freePercent%)"
+            Add-Result -Results $Results -Name "C: Drive Check" -Result "FAIL - $summary"
         }
     } catch {
         Add-Result -Results $Results -Name "C: Drive Check" -Result "ERROR - $_"
     }
 }
-
 
 function Check-SyslogSetup {
     param ([ref]$Results)
