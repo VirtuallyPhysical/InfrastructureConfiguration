@@ -2,13 +2,25 @@
 # Configurable Variables
 # =======================
 $SharePath = "\\server\share\installers"
-$ExpectedDnsServers = @("10.0.0.1", "10.0.0.2")  # Replace with your required DNS servers
-$InterfaceAlias = $(Get-DnsClient | Where-Object {$_.InterfaceAlias -notlike "Loopback*"} | Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceAlias)
 $LogFilePath = Join-Path -Path $SharePath -ChildPath "DNS_Config_Status.csv"
+$DC1_DNSServers = @("10.0.0.1", "10.0.0.2")
+$DC2_DNSServers = @("10.0.0.2", "10.0.0.1")
+$InterfaceAlias = $(Get-DnsClient | Where-Object {$_.InterfaceAlias -notlike "Loopback*"} | Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceAlias)
 
 # =======================
 # Functions
 # =======================
+
+function Get-ADSiteName {
+    try {
+        $siteName = ([System.DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite()).Name
+        Write-Host "Detected AD Site: $siteName"
+        return $siteName
+    } catch {
+        Write-Warning "Unable to detect AD site. Defaulting to DC1."
+        return "DC1"
+    }
+}
 
 function Set-DnsServersInOrder {
     param (
@@ -16,13 +28,8 @@ function Set-DnsServersInOrder {
         [string]$Alias
     )
 
-    if (-not $DnsServers -or $DnsServers.Count -eq 0) {
-        Write-Error "You must specify DNS server IPs."
-        return $false
-    }
-
     try {
-        Write-Host "Setting DNS servers on interface '$Alias': $($DnsServers -join ', ')"
+        Write-Host "Setting DNS on '$Alias' to: $($DnsServers -join ', ')"
         Set-DnsClientServerAddress -InterfaceAlias $Alias -ServerAddresses $DnsServers -ErrorAction Stop
         return $true
     } catch {
@@ -40,9 +47,7 @@ function Check-DnsConfig {
     try {
         $current = (Get-DnsClientServerAddress -InterfaceAlias $Alias -AddressFamily IPv4).ServerAddresses
 
-        if ($current.Count -ne $Expected.Count) {
-            return $false
-        }
+        if ($current.Count -ne $Expected.Count) { return $false }
 
         for ($i = 0; $i -lt $Expected.Count; $i++) {
             if ($current[$i] -ne $Expected[$i]) {
@@ -60,14 +65,20 @@ function Check-DnsConfig {
 function Log-DnsResult {
     param (
         [string]$ComputerName,
+        [string]$ADSite,
+        [string]$PrimaryDNS,
+        [string]$SecondaryDNS,
         [bool]$SetSuccess,
         [bool]$VerifySuccess
     )
 
     $entry = [PSCustomObject]@{
-        ComputerName       = $ComputerName
-        DNS_Set_Success    = $SetSuccess
-        DNS_Verify_Success = $VerifySuccess
+        ComputerName        = $ComputerName
+        ADSite              = $ADSite
+        PrimaryDNS          = $PrimaryDNS
+        SecondaryDNS        = $SecondaryDNS
+        DNS_Set_Success     = $SetSuccess
+        DNS_Verify_Success  = $VerifySuccess
     }
 
     $entry | Export-Csv -Path $LogFilePath -Append -NoTypeInformation -Force -Encoding UTF8
@@ -78,21 +89,25 @@ function Log-DnsResult {
 # =======================
 
 $ComputerName = $env:COMPUTERNAME
+$ADSite = Get-ADSiteName
 
-Write-Host "`n--- Setting DNS Configuration ---"
-$setSuccess = Set-DnsServersInOrder -DnsServers $ExpectedDnsServers -Alias $InterfaceAlias
-
-Write-Host "`n--- Verifying DNS Configuration ---"
-$verifySuccess = $false
-if ($setSuccess) {
-    $verifySuccess = Check-DnsConfig -Expected $ExpectedDnsServers -Alias $InterfaceAlias
+switch ($ADSite) {
+    "DC2" { $dnsOrder = $DC2_DNSServers }
+    default { $dnsOrder = $DC1_DNSServers }
 }
 
-Write-Host "`n--- Logging Result ---"
-Log-DnsResult -ComputerName $ComputerName -SetSuccess $setSuccess -VerifySuccess $verifySuccess
+$setSuccess = Set-DnsServersInOrder -DnsServers $dnsOrder -Alias $InterfaceAlias
+$verifySuccess = $false
+if ($setSuccess) {
+    $verifySuccess = Check-DnsConfig -Expected $dnsOrder -Alias $InterfaceAlias
+}
+
+Log-DnsResult -ComputerName $ComputerName -ADSite $ADSite `
+    -PrimaryDNS $dnsOrder[0] -SecondaryDNS $dnsOrder[1] `
+    -SetSuccess $setSuccess -VerifySuccess $verifySuccess
 
 if ($setSuccess -and $verifySuccess) {
-    Write-Host "✅ DNS configuration applied and verified successfully."
+    Write-Host "✅ DNS configured correctly for site $ADSite."
 } else {
-    Write-Warning "⚠️ DNS configuration failed or verification did not match. Check the CSV log for details."
+    Write-Warning "⚠️ DNS configuration failed or mismatched for site $ADSite."
 }
