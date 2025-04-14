@@ -263,8 +263,7 @@ function Check-ResourceUsage {
     param ([ref]$Results)
 
     try {
-        # Sampling config (adjust for full UAT run)
-        $sampleCount = 6        # Use 60 for full 1-hour check
+        $sampleCount = 6        # Use 60 for full hour
         $sampleInterval = 10    # Use 60 for once per minute
 
         $counters = @(
@@ -278,49 +277,44 @@ function Check-ResourceUsage {
 
         $data = Get-Counter -Counter $counters -SampleInterval $sampleInterval -MaxSamples $sampleCount
 
-        # CPU and Memory (fixed math)
-        $cpuSamples = $data.CounterSamples | Where-Object { $_.Path -eq '\Processor(_Total)\% Processor Time' } | Select-Object -ExpandProperty CookedValue
-        $memSamples = $data.CounterSamples | Where-Object { $_.Path -eq '\Memory\% Committed Bytes In Use' } | Select-Object -ExpandProperty CookedValue
+        # CPU and Memory
+        $coreCount = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+        $cpuSamples = $data.CounterSamples | Where-Object { $_.InstanceName -ieq '_Total' -and $_.Path -like '*% Processor Time' } | Select-Object -ExpandProperty CookedValue
+        $memSamples = $data.CounterSamples | Where-Object { $_.Path -like '*\Memory\% Committed Bytes In Use' } | Select-Object -ExpandProperty CookedValue
 
-        $cpu = @{
-            Avg = [math]::Round(($cpuSamples | Measure-Object -Average).Average * 100, 2)
-            Peak = [math]::Round(($cpuSamples | Measure-Object -Maximum).Maximum * 100, 2)
-        }
-        $mem = @{
-            Avg = [math]::Round(($memSamples | Measure-Object -Average).Average, 2)
-            Peak = [math]::Round(($memSamples | Measure-Object -Maximum).Maximum, 2)
-        }
+        $cpuAvg = [math]::Round((($cpuSamples | Measure-Object -Average).Average * 100) / $coreCount, 2)
+        $cpuPeak = [math]::Round((($cpuSamples | Measure-Object -Maximum).Maximum * 100) / $coreCount, 2)
+        $memAvg = [math]::Round(($memSamples | Measure-Object -Average).Average, 2)
+        $memPeak = [math]::Round(($memSamples | Measure-Object -Maximum).Maximum, 2)
 
-        # Disk I/O
-        function Get-AvgPeakByPattern {
+        # Helper for disk and network
+        function Get-AvgPeak {
             param ($pattern)
             $samples = $data.CounterSamples | Where-Object { $_.Path -like "*$pattern*" } | Select-Object -ExpandProperty CookedValue
             if (-not $samples -or $samples.Count -eq 0) {
                 return @{ Avg = 0; Peak = 0 }
             }
             return @{
-                Avg = [math]::Round(($samples | Measure-Object -Average).Average, 2)
-                Peak = [math]::Round(($samples | Measure-Object -Maximum).Maximum, 2)
+                Avg  = [math]::Round(($samples | Measure-Object -Average).Average / 1KB, 2)
+                Peak = [math]::Round(($samples | Measure-Object -Maximum).Maximum / 1KB, 2)
             }
         }
 
-        $diskRead  = Get-AvgPeakByPattern 'Disk Read Bytes/sec'
-        $diskWrite = Get-AvgPeakByPattern 'Disk Write Bytes/sec'
-        $netIn     = Get-AvgPeakByPattern 'Bytes Received/sec'
-        $netOut    = Get-AvgPeakByPattern 'Bytes Sent/sec'
+        $diskRead  = Get-AvgPeak 'Disk Read Bytes/sec'
+        $diskWrite = Get-AvgPeak 'Disk Write Bytes/sec'
+        $netIn     = Get-AvgPeak 'Bytes Received/sec'
+        $netOut    = Get-AvgPeak 'Bytes Sent/sec'
 
-        # Build summary with correct values
         $summary = @(
-            "CPU: Avg $($cpu.Avg)%, Peak $($cpu.Peak)%",
-            "Memory: Avg $($mem.Avg)%, Peak $($mem.Peak)%",
-            "Disk Read: Avg $([math]::Round($diskRead.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskRead.Peak / 1KB, 2)) KB/s",
-            "Disk Write: Avg $([math]::Round($diskWrite.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskWrite.Peak / 1KB, 2)) KB/s",
-            "Network In: Avg $([math]::Round($netIn.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netIn.Peak / 1KB, 2)) KB/s",
-            "Network Out: Avg $([math]::Round($netOut.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netOut.Peak / 1KB, 2)) KB/s"
+            "CPU: Avg ${cpuAvg}%, Peak ${cpuPeak}%",
+            "Memory: Avg ${memAvg}%, Peak ${memPeak}%",
+            "Disk Read: Avg $($diskRead.Avg) KB/s, Peak $($diskRead.Peak) KB/s",
+            "Disk Write: Avg $($diskWrite.Avg) KB/s, Peak $($diskWrite.Peak) KB/s",
+            "Network In: Avg $($netIn.Avg) KB/s, Peak $($netIn.Peak) KB/s",
+            "Network Out: Avg $($netOut.Avg) KB/s, Peak $($netOut.Peak) KB/s"
         ) -join " | "
 
-        # Pass/fail check
-        if ($cpu.Avg -gt 85 -or $mem.Avg -gt 85) {
+        if ($cpuAvg -gt 85 -or $memAvg -gt 85) {
             Add-Result -Results $Results -Name "Resource Usage" -Result "FAIL - High CPU or Memory. $summary"
         } else {
             Add-Result -Results $Results -Name "Resource Usage" -Result "PASS - $summary"
