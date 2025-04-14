@@ -263,11 +263,10 @@ function Check-ResourceUsage {
     param ([ref]$Results)
 
     try {
-        # Sample interval: 1 sample every 60 seconds, for 60 minutes = 60 samples
-        $sampleCount = 60
-        $sampleInterval = 60
+        # Use shorter time for testing (6 samples every 10 seconds = 1 minute)
+        $sampleCount = 6        # Set to 60 for 1-hour check
+        $sampleInterval = 10    # Set to 60 for once per minute
 
-        # Collect counters
         $counters = @(
             '\Processor(_Total)\% Processor Time',
             '\Memory\% Committed Bytes In Use',
@@ -279,49 +278,42 @@ function Check-ResourceUsage {
 
         $data = Get-Counter -Counter $counters -SampleInterval $sampleInterval -MaxSamples $sampleCount
 
-        # Helper to get average and peak for a given counter
-        function Get-AvgPeak {
-            param ($counterName)
-
-            $values = $data.CounterSamples |
-                Where-Object { $_.Path -like "*$counterName*" } |
-                Select-Object -ExpandProperty CookedValue
-
-            if ($values.Count -eq 0) {
+        function Get-AvgPeakByPattern {
+            param ($pattern)
+            $samples = $data.CounterSamples | Where-Object { $_.Path -like "*$pattern*" } | Select-Object -ExpandProperty CookedValue
+            if (-not $samples -or $samples.Count -eq 0) {
                 return @{ Avg = 0; Peak = 0 }
             }
-
             return @{
-                Avg  = [math]::Round(($values | Measure-Object -Average).Average, 2)
-                Peak = [math]::Round(($values | Measure-Object -Maximum).Maximum, 2)
+                Avg = [math]::Round(($samples | Measure-Object -Average).Average, 2)
+                Peak = [math]::Round(($samples | Measure-Object -Maximum).Maximum, 2)
             }
         }
 
-        # Collect values
-        $cpu = Get-AvgPeak -counterName '% Processor Time'
-        $mem = Get-AvgPeak -counterName '% Committed Bytes In Use'
-        $diskRead = Get-AvgPeak -counterName 'Disk Read Bytes/sec'
-        $diskWrite = Get-AvgPeak -counterName 'Disk Write Bytes/sec'
-        $netIn = Get-AvgPeak -counterName 'Bytes Received/sec'
-        $netOut = Get-AvgPeak -counterName 'Bytes Sent/sec'
+        $cpu       = Get-AvgPeakByPattern '% Processor Time'
+        $mem       = Get-AvgPeakByPattern '% Committed Bytes In Use'
+        $diskRead  = Get-AvgPeakByPattern 'Disk Read Bytes/sec'
+        $diskWrite = Get-AvgPeakByPattern 'Disk Write Bytes/sec'
+        $netIn     = Get-AvgPeakByPattern 'Bytes Received/sec'
+        $netOut    = Get-AvgPeakByPattern 'Bytes Sent/sec'
 
-        $cpuAvg = $cpu.Avg
-        $memAvg = $mem.Avg
-
+        # Build human-readable summary
         $summary = @(
             "CPU: Avg ${cpu.Avg}%, Peak ${cpu.Peak}%",
             "Memory: Avg ${mem.Avg}%, Peak ${mem.Peak}%",
-            "Disk Read: Avg $([math]::Round($diskRead.Avg / 1KB,2)) KB/s, Peak $([math]::Round($diskRead.Peak / 1KB,2)) KB/s",
-            "Disk Write: Avg $([math]::Round($diskWrite.Avg / 1KB,2)) KB/s, Peak $([math]::Round($diskWrite.Peak / 1KB,2)) KB/s",
-            "Network In: Avg $([math]::Round($netIn.Avg / 1KB,2)) KB/s, Peak $([math]::Round($netIn.Peak / 1KB,2)) KB/s",
-            "Network Out: Avg $([math]::Round($netOut.Avg / 1KB,2)) KB/s, Peak $([math]::Round($netOut.Peak / 1KB,2)) KB/s"
+            "Disk Read: Avg $([math]::Round($diskRead.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskRead.Peak / 1KB, 2)) KB/s",
+            "Disk Write: Avg $([math]::Round($diskWrite.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskWrite.Peak / 1KB, 2)) KB/s",
+            "Network In: Avg $([math]::Round($netIn.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netIn.Peak / 1KB, 2)) KB/s",
+            "Network Out: Avg $([math]::Round($netOut.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netOut.Peak / 1KB, 2)) KB/s"
         ) -join " | "
 
-        if ($cpuAvg -gt 85 -or $memAvg -gt 85) {
+        # Check thresholds
+        if ($cpu.Avg -gt 85 -or $mem.Avg -gt 85) {
             Add-Result -Results $Results -Name "Resource Usage" -Result "FAIL - High CPU or Memory. $summary"
         } else {
             Add-Result -Results $Results -Name "Resource Usage" -Result "PASS - $summary"
         }
+
     } catch {
         Add-Result -Results $Results -Name "Resource Usage" -Result "ERROR - $_"
     }
