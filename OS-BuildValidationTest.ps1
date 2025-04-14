@@ -23,23 +23,63 @@ function Add-Result {
 
 # --- UAT Checks ---
 function Check-DNSConfig {
-    param ($ExpectedDNS, [ref]$Results)
+    param ([ref]$Results)
+
     try {
-        $configuredDNS = Get-DnsClientServerAddress -AddressFamily IPv4 |
-                         Select-Object -ExpandProperty ServerAddresses -Unique
+        # Define per-site DNS expectations
+        $DC1_DNSServers = @("10.0.0.1", "10.0.0.2")
+        $DC2_DNSServers = @("10.0.0.2", "10.0.0.1")
 
-        $expectedString = $ExpectedDNS -join ", "
-        $actualString = $configuredDNS -join ", "
+        # Get interface alias (excluding Loopback etc.)
+        $InterfaceAlias = Get-DnsClient | Where-Object { $_.InterfaceAlias -notlike "Loopback*" } |
+                          Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceAlias
 
-        if ($ExpectedDNS.Count -ne $configuredDNS.Count) {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Count mismatch. Expected: $expectedString | Found: $actualString"
+        # Get current DNS config
+        $current = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4).ServerAddresses
+        $expected = $null
+        $ADSite = "Unknown"
+
+        # Compare function
+        function Compare-DnsOrder {
+            param ($current, $expected)
+            if ($current.Count -ne $expected.Count) { return $false }
+            for ($i = 0; $i -lt $expected.Count; $i++) {
+                if ($current[$i] -ne $expected[$i]) { return $false }
+            }
+            return $true
         }
-        elseif (-not ($ExpectedDNS -eq $configuredDNS)) {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Order mismatch. Expected: $expectedString | Found: $actualString"
+
+        # Detect mismatch
+        $currentString = $current -join ", "
+        $ADSite = ([System.DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite()).Name
+        switch ($ADSite) {
+            "DC2" { $expected = $DC2_DNSServers }
+            default { $expected = $DC1_DNSServers }
         }
-        else {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS matches expected order: $actualString"
+        $expectedString = $expected -join ", "
+
+        $isCorrect = Compare-DnsOrder -current $current -expected $expected
+
+        if ($isCorrect) {
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS matches expected order: $expectedString"
+        } else {
+            # Attempt auto-fix
+            try {
+                Set-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -ServerAddresses $expected -ErrorAction Stop
+                Start-Sleep -Seconds 2  # Give it a moment to apply
+                $updated = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4).ServerAddresses
+                $isNowCorrect = Compare-DnsOrder -current $updated -expected $expected
+
+                if ($isNowCorrect) {
+                    Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS updated to: $expectedString"
+                } else {
+                    Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - DNS mismatch after attempted fix. Expected: $expectedString | Found: $($updated -join ', ')"
+                }
+            } catch {
+                Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Failed to update DNS: $_"
+            }
         }
+
     } catch {
         Add-Result -Results $Results -Name "DNS Configuration" -Result "ERROR - $_"
     }
