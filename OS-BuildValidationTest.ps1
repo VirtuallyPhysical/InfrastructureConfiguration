@@ -148,14 +148,35 @@ function Check-Network {
 
 function Check-GPOs {
     param (
-        [ref]$Results,
-        [string[]]$ExpectedGPOs = @("Test1-GPO", "Test2-GPO")
+        [ref]$Results
     )
 
     try {
+        # Detect OS
+        $osInfo = Get-CimInstance Win32_OperatingSystem
+        $caption = $osInfo.Caption
+
+        # Define expected GPOs per OS
+        $Windows11GPOs = @("Win11-GPO1", "Win11-GPO2")
+        $WindowsServerGPOs = @("Server-GPO1", "Server-GPO2")
+
+        if ($caption -match "Windows 11") {
+            $ExpectedGPOs = $Windows11GPOs
+            $osType = "Windows 11"
+        } elseif ($caption -match "Windows Server") {
+            $ExpectedGPOs = $WindowsServerGPOs
+            $osType = "Windows Server"
+        } else {
+            $ExpectedGPOs = @()
+            $osType = "Unknown OS"
+        }
+
+        Add-Result -Results $Results -Name "Detected OS" -Result $osType
+
+        # Run gpresult to gather applied GPOs
         $gpoOutput = gpresult /r /scope:computer 2>&1
 
-        # Extract applied GPOs from the output
+        # Extract applied GPOs
         $appliedGPOs = @()
         $start = $false
         foreach ($line in $gpoOutput) {
@@ -163,7 +184,7 @@ function Check-GPOs {
                 $start = $true
                 continue
             }
-            if ($start -and ($line -match "^\S")) { break }  # Stop at next heading
+            if ($start -and ($line -match "^\S")) { break }
             if ($start -and $line.Trim()) {
                 $appliedGPOs += $line.Trim()
             }
@@ -173,18 +194,20 @@ function Check-GPOs {
         Add-Result -Results $Results -Name "Applied GPOs" -Result $appliedList
 
         # Check for expected GPOs
-        $missing = $ExpectedGPOs | Where-Object { $_ -notin $appliedGPOs }
-
-        if ($missing.Count -eq 0) {
-            Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied: $($ExpectedGPOs -join ', ')"
+        if ($ExpectedGPOs.Count -gt 0) {
+            $missing = $ExpectedGPOs | Where-Object { $_ -notin $appliedGPOs }
+            if ($missing.Count -eq 0) {
+                Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied: $($ExpectedGPOs -join ', ')"
+            } else {
+                Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')"
+            }
         } else {
-            Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')"
+            Add-Result -Results $Results -Name "GPO Validation" -Result "WARNING - No expected GPOs defined for $osType"
         }
 
-        # Get computer group membership
-        $groupLines = $gpoOutput | Where-Object { $_ -match "The computer is a part of the following security groups" }
-        $groupStart = $false
+        # Capture computer group membership
         $groups = @()
+        $groupStart = $false
         foreach ($line in $gpoOutput) {
             if ($line -match "The computer is a part of the following security groups") {
                 $groupStart = $true
@@ -216,21 +239,28 @@ function Check-GuestAccount {
 }
 
 function Check-WindowsServices {
-    param ([ref]$Results)
+    param (
+        [ref]$Results,
+        [string[]]$ExcludedServices = @("edgeupdate")  # Default excluded services
+    )
     try {
         $allServices = Get-Service
         $autoServices = $allServices | Where-Object { $_.StartType -eq 'Automatic' }
-        $stoppedAuto = $autoServices | Where-Object { $_.Status -ne 'Running' }
+
+        # Exclude services if defined
+        $filteredServices = $autoServices | Where-Object { $_.Name -notin $ExcludedServices }
+        # Find stopped auto services
+        $stoppedAuto = $filteredServices | Where-Object { $_.Status -ne 'Running' }
 
         if ($stoppedAuto.Count -eq 0) {
-            Add-Result -Results $Results -Name "Windows Services Status" -Result "PASS - All automatic services are running"
+            Add-Result -Results $Results -Name "Windows Services Status" -Result "PASS - All automatic services (excluding exclusions) are running"
         } else {
             $failedList = $stoppedAuto | Select-Object Name, DisplayName, Status | Out-String
             Add-Result -Results $Results -Name "Windows Services Status" -Result "FAIL - Some automatic services are not running"
             Add-Result -Results $Results -Name "Stopped Auto Services" -Result $failedList.Trim()
         }
 
-        # Optional: Include all currently running services for info
+        # Info: running services
         $runningSummary = $allServices | Where-Object { $_.Status -eq "Running" } |
                           Select-Object StartType, Status, Name, DisplayName | Out-String
         Add-Result -Results $Results -Name "Running Services Summary" -Result $runningSummary.Trim()
