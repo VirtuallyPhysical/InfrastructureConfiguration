@@ -1,416 +1,260 @@
-<#
-.SYNOPSIS
-    OS Build Validation - Extended checks
-.DESCRIPTION
-    Performs many validation checks and writes CSV/TXT results.
-.NOTES
-    Run elevated. Adjust the default expected GPOs, excluded services and required software as needed.
-#>
+#-------------------- Variables --------------------
 
-# ---------- Helper: Add-Result (mirrors style from your repo) ----------
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$csvPath = ".\Workstation-BuildValidationResults-$timestamp.csv"
+$ExpectedSoftware = @("Google Chrome", "VMware Tools")
+
+# ------------------ Helper Functions ------------------
+
 function Add-Result {
-    param(
+    param (
         [ref]$Results,
         [string]$Name,
-        [string]$Result,
-        [string]$Level = "INFO"   # INFO / PASS / FAIL / WARN / ERROR
+        [string]$Result
     )
-    $obj = [PSCustomObject]@{
-        Timestamp = (Get-Date).ToString("o")
-        Name      = $Name
-        Result    = $Result
-        Level     = $Level
+    $Results.Value += [PSCustomObject]@{
+        Test   = $Name
+        Result = $Result
     }
-    $Results.Value += $obj
 }
 
-# ---------- Main check functions ----------
-function Get-DomainJoin {
-    param([ref]$Results)
+# ------------------ Validation Functions ------------------
+
+function Check-Domain {
+    param ([ref]$Results)
     try {
-        $compSys = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-        $domain = if ($compSys.PartOfDomain) { $compSys.Domain } else { "Not Domain Joined" }
-        Add-Result -Results $Results -Name "Domain Join" -Result $domain -Level "INFO"
-        return $domain
+        $domain = (Get-WmiObject Win32_ComputerSystem).Domain
+        Add-Result -Results $Results -Name "Domain Membership" -Result $domain
     } catch {
-        Add-Result -Results $Results -Name "Domain Join" -Result "ERROR - $_" -Level "ERROR"
-        return $null
+        Add-Result -Results $Results -Name "Domain Membership" -Result "ERROR - $_"
     }
 }
 
 function Check-GPOs {
-    param(
-        [ref]$Results,
-        [string[]]$ExpectedGPOs = @("GPO1","GPO2")
-    )
+    param ([ref]$Results)
     try {
-        # Get OS caption (for logging)
-        $os = (Get-CimInstance Win32_OperatingSystem).Caption
-        Add-Result -Results $Results -Name "GPO OS Detected" -Result $os -Level "INFO"
-
         $gpoOutput = gpresult /r /scope:computer 2>&1
+
         $appliedGPOs = @()
         $start = $false
         foreach ($line in $gpoOutput) {
-            if ($line -match "Applied Group Policy Objects") { $start = $true; continue }
+            if ($line -match "Applied Group Policy Objects") {
+                $start = $true
+                continue
+            }
             if ($start -and ($line -match "^\S")) { break }
-            if ($start -and $line.Trim()) { $appliedGPOs += $line.Trim() }
+            if ($start -and $line.Trim()) {
+                $appliedGPOs += $line.Trim()
+            }
         }
-        Add-Result -Results $Results -Name "Applied GPOs" -Result (($appliedGPOs -join ", ") -ne "" ? ($appliedGPOs -join ", ") : "None found") -Level "INFO"
 
-        $missing = $ExpectedGPOs | Where-Object { $_ -notin $appliedGPOs }
+        $expectedGPOs = @("GPO1", "GPO2")
+        $missing = $expectedGPOs | Where-Object { $_ -notin $appliedGPOs }
+
         if ($missing.Count -eq 0) {
-            Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied: $($ExpectedGPOs -join ', ')" -Level "PASS"
+            Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied"
         } else {
-            Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')" -Level "FAIL"
+            Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')"
         }
     } catch {
-        Add-Result -Results $Results -Name "GPO Validation" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "GPO Validation" -Result "ERROR - $_"
     }
 }
 
-function Check-DriversAndHardware {
-    param([ref]$Results)
+function Check-Drivers {
+    param ([ref]$Results)
     try {
-        # Use Get-PnpDevice to list devices in error state
-        $devices = Get-PnpDevice -ErrorAction SilentlyContinue
-        $errorDevices = $devices | Where-Object { $_.Status -ne "OK" -and $_.Status -ne $null }
-        if ($errorDevices.Count -eq 0) {
-            Add-Result -Results $Results -Name "Drivers/Hardware" -Result "PASS - No hardware in error state" -Level "PASS"
+        $devices = Get-WmiObject Win32_PnPEntity | Where-Object { $_.ConfigManagerErrorCode -ne 0 }
+        if ($devices) {
+            $deviceList = $devices | Select-Object Name, ConfigManagerErrorCode | Out-String
+            Add-Result -Results $Results -Name "Driver Status" -Result "FAIL - Devices with errors:`n$deviceList"
         } else {
-            $list = $errorDevices | Select-Object InstanceId,Class,Manufacturer,Status,Name | Out-String
-            Add-Result -Results $Results -Name "Drivers/Hardware" -Result "FAIL - Devices in non-OK state" -Level "FAIL"
-            Add-Result -Results $Results -Name "DevicesWithIssues" -Result $list -Level "INFO"
+            Add-Result -Results $Results -Name "Driver Status" -Result "PASS - All drivers installed correctly"
         }
-
     } catch {
-        Add-Result -Results $Results -Name "Drivers/Hardware" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "Driver Status" -Result "ERROR - $_"
     }
 }
 
-function List-LocalAccounts {
-    param([ref]$Results)
+function Check-LocalAccounts {
+    param ([ref]$Results)
     try {
-        $accounts = Get-LocalUser | Select-Object Name,Enabled,Description,LastLogon | Sort-Object Name
-        if ($accounts) {
-            $str = $accounts | Format-Table -AutoSize | Out-String
-            Add-Result -Results $Results -Name "Local Accounts" -Result "INFO - See details" -Level "INFO"
-            Add-Result -Results $Results -Name "LocalAccountsDetail" -Result $str -Level "INFO"
-        } else {
-            Add-Result -Results $Results -Name "Local Accounts" -Result "None found" -Level "INFO"
-        }
+        $accounts = Get-LocalUser | Select-Object Name, Enabled | Out-String
+        Add-Result -Results $Results -Name "Local Accounts" -Result $accounts.Trim()
     } catch {
-        Add-Result -Results $Results -Name "Local Accounts" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "Local Accounts" -Result "ERROR - $_"
     }
 }
 
-function List-LocalGroupsWithMembers {
-    param([ref]$Results)
+function Check-LocalGroups {
+    param ([ref]$Results)
     try {
-        $groups = Get-LocalGroup | Sort-Object Name
-        $out = @()
-        foreach ($g in $groups) {
-            $members = @()
-            try {
-                $members = Get-LocalGroupMember -Group $g.Name -ErrorAction Stop | Select-Object @{n='Name';e={$_.Name}}, @{n='ObjectClass';e={$_.ObjectClass}}
-            } catch {
-                # no members or permission issue
-                $members = @()
-            }
-            if ($members.Count -gt 0) {
-                $out += [PSCustomObject]@{
-                    Group = $g.Name
-                    Members = ($members | ForEach-Object { "$($_.Name) [$($_.ObjectClass)]" }) -join "; "
-                }
-            }
-        }
-
-        if ($out.Count -gt 0) {
-            Add-Result -Results $Results -Name "Local Groups With Members" -Result "INFO - See details" -Level "INFO"
-            $detail = $out | Format-Table -AutoSize | Out-String
-            Add-Result -Results $Results -Name "LocalGroupsDetail" -Result $detail -Level "INFO"
-        } else {
-            Add-Result -Results $Results -Name "Local Groups With Members" -Result "None found" -Level "INFO"
-        }
-    } catch {
-        Add-Result -Results $Results -Name "Local Groups With Members" -Result "ERROR - $_" -Level "ERROR"
-    }
-}
-
-function Check-BitLocker {
-    param([ref]$Results)
-    try {
-        $vols = Get-BitLockerVolume -ErrorAction Stop
-        $notEncrypted = $vols | Where-Object { $_.VolumeStatus -ne 'FullyEncrypted' -and $_.VolumeStatus -ne 'EncryptionInProgress' }
-        if ($notEncrypted.Count -eq 0) {
-            Add-Result -Results $Results -Name "BitLocker" -Result "PASS - All volumes encrypted or encryption in progress" -Level "PASS"
-        } else {
-            $list = $notEncrypted | Select-Object MountPoint,VolumeStatus,KeyProtector | Out-String
-            Add-Result -Results $Results -Name "BitLocker" -Result "FAIL - Some volumes not encrypted" -Level "FAIL"
-            Add-Result -Results $Results -Name "BitLockerNotEncryptedDetail" -Result $list -Level "INFO"
-        }
-    } catch {
-        Add-Result -Results $Results -Name "BitLocker" -Result "ERROR - $_ (Get-BitLockerVolume may require PowerShell 5+/admin)" -Level "ERROR"
-    }
-}
-
-function Check-USBLockdown {
-    param([ref]$Results)
-    try {
-        # Check USBSTOR start value
-        $usbStorKey = "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"
-        $usbStorDisabled = $false
-        try {
-            $startVal = (Get-ItemProperty -Path $usbStorKey -Name Start -ErrorAction Stop).Start
-            # Start == 3 is manual, 4 disabled
-            $usbStorDisabled = ($startVal -eq 4)
-            Add-Result -Results $Results -Name "USBSTOR_StartValue" -Result "Start=$startVal" -Level "INFO"
-        } catch {
-            Add-Result -Results $Results -Name "USBSTOR_StartValue" -Result "Not found" -Level "INFO"
-        }
-
-        # Enumerate USB controllers and currently connected USB devices
-        $usbControllers = Get-PnpDevice -Class USB -ErrorAction SilentlyContinue | Select-Object InstanceId,Status,Name,Manufacturer
-        $usbDevices = Get-PnpDevice -PresentOnly | Where-Object { $_.Class -eq 'USB' -or $_.Class -eq 'USBDevice' } | Select-Object InstanceId,Status,Name
-        Add-Result -Results $Results -Name "USB Controllers" -Result ( ($usbControllers | ForEach-Object { $_.Name }) -join ', ' ) -Level "INFO"
-        Add-Result -Results $Results -Name "USB Present Devices" -Result ( ($usbDevices | ForEach-Object { $_.Name }) -join ', ' ) -Level "INFO"
-
-        # Determine overall pass/fail: if USBSTOR disabled => PASS; otherwise WARN (depends on policy)
-        if ($usbStorDisabled) {
-            Add-Result -Results $Results -Name "USB Lockdown" -Result "PASS - USBSTOR disabled (registry Start=4)" -Level "PASS"
-        } else {
-            Add-Result -Results $Results -Name "USB Lockdown" -Result "WARN - USBSTOR not disabled. Verify other policies or device control solution" -Level "WARN"
-        }
-    } catch {
-        Add-Result -Results $Results -Name "USB Lockdown" -Result "ERROR - $_" -Level "ERROR"
-    }
-}
-
-function Check-TelegrafAgent {
-    param([ref]$Results)
-    try {
-        # Common telegraf service name is 'telegraf', but vendor packaging may differ
-        $svc = Get-Service -Name telegraf -ErrorAction SilentlyContinue
-        if ($null -ne $svc) {
-            $status = $svc.Status
-            if ($status -eq 'Running') {
-                Add-Result -Results $Results -Name "Telegraf Agent" -Result "PASS - Telegraf service installed and running" -Level "PASS"
-            } else {
-                Add-Result -Results $Results -Name "Telegraf Agent" -Result "FAIL - Telegraf service present but not running (Status: $status)" -Level "FAIL"
-            }
-        } else {
-            # Also check Program Files
-            $paths = @(
-                "$env:ProgramFiles\telegraf",
-                "$env:ProgramFiles(x86)\telegraf",
-                "$env:ProgramFiles\Telegraf",
-                "$env:ProgramFiles\influxdata\telegraf"
-            )
-            $found = $paths | Where-Object { Test-Path $_ } 
-            if ($found) {
-                Add-Result -Results $Results -Name "Telegraf Agent" -Result "WARN - Telegraf appears installed at: $($found -join ', ') but service not found" -Level "WARN"
-            } else {
-                Add-Result -Results $Results -Name "Telegraf Agent" -Result "FAIL - Telegraf not found" -Level "FAIL"
+        $groups = Get-LocalGroup
+        foreach ($group in $groups) {
+            $members = Get-LocalGroupMember -Group $group.Name -ErrorAction SilentlyContinue
+            if ($members) {
+                $memberList = $members | Select-Object Name, ObjectClass | Out-String
+                Add-Result -Results $Results -Name "Group: $($group.Name)" -Result $memberList.Trim()
             }
         }
     } catch {
-        Add-Result -Results $Results -Name "Telegraf Agent" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "Local Groups" -Result "ERROR - $_"
     }
 }
 
-function Get-LastInstalledPatches {
-    param([ref]$Results, [int]$Count = 10)
+function Check-Bitlocker {
+    param ([ref]$Results)
     try {
-        # Get-HotFix returns InstalledOn and HotFixID (KB)
-        $hotfixes = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First $Count
-        if ($hotfixes.Count -eq 0) {
-            Add-Result -Results $Results -Name "Last Installed Patches" -Result "None found" -Level "INFO"
-            return
-        }
-        $table = $hotfixes | Select-Object HotFixID, InstalledOn, Description | Format-Table -AutoSize | Out-String
-        Add-Result -Results $Results -Name "Last Installed Patches" -Result "INFO - See details" -Level "INFO"
-        Add-Result -Results $Results -Name "LastInstalledPatchesDetail" -Result $table -Level "INFO"
-
-        # Note: release date of KB is not stored locally — to find release date you'd need to query Microsoft update catalog (web)
-    } catch {
-        Add-Result -Results $Results -Name "Last Installed Patches" -Result "ERROR - $_" -Level "ERROR"
-    }
-}
-
-function Check-WindowsFirewall {
-    param([ref]$Results)
-    try {
-        $profiles = Get-NetFirewallProfile | Select-Object Name, Enabled
-        $fail = $profiles | Where-Object { $_.Enabled -eq $false }
-        $profilesStr = $profiles | Format-Table -AutoSize | Out-String
-        Add-Result -Results $Results -Name "Windows Firewall Profiles" -Result "INFO - See details" -Level "INFO"
-        Add-Result -Results $Results -Name "FirewallProfileDetail" -Result $profilesStr -Level "INFO"
-
-        if ($fail.Count -eq 0) {
-            Add-Result -Results $Results -Name "Windows Firewall" -Result "PASS - Firewall enabled for all profiles" -Level "PASS"
+        $volumes = Get-BitLockerVolume
+        $unencrypted = $volumes | Where-Object { $_.ProtectionStatus -ne "On" }
+        if ($unencrypted) {
+            $volList = $unencrypted | Select-Object MountPoint, ProtectionStatus | Out-String
+            Add-Result -Results $Results -Name "Bitlocker Status" -Result "FAIL - Unprotected volumes:`n$volList"
         } else {
-            Add-Result -Results $Results -Name "Windows Firewall" -Result ("FAIL - Firewall disabled for: " + ($fail | ForEach-Object { $_.Name } -join ', ')) -Level "FAIL"
+            Add-Result -Results $Results -Name "Bitlocker Status" -Result "PASS - All volumes encrypted"
         }
     } catch {
-        Add-Result -Results $Results -Name "Windows Firewall" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "Bitlocker Status" -Result "ERROR - $_"
     }
 }
 
-function Get-BIOSInfo {
-    param([ref]$Results)
+function Check-USBPorts {
+    param ([ref]$Results)
     try {
-        # Note: To get vendor-specific BIOS configuration you will usually need vendor tooling.
-        $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop | Select-Object Manufacturer,SMBIOSBIOSVersion,SerialNumber,ReleaseDate,Version
-        $biosStr = $bios | Format-List | Out-String
-        Add-Result -Results $Results -Name "BIOS Info" -Result "INFO - See details" -Level "INFO"
-        Add-Result -Results $Results -Name "BIOSInfoDetail" -Result $biosStr -Level "INFO"
-
-        # Attempt to include SecureBoot state (from UEFI)
-        try {
-            $sb = Confirm-SecureBootUEFI
-            Add-Result -Results $Results -Name "SecureBoot" -Result ("Secure Boot enabled: $sb") -Level "INFO"
-        } catch { }
-    } catch {
-        Add-Result -Results $Results -Name "BIOS Info" -Result "ERROR - $_" -Level "ERROR"
-    }
-}
-
-function Check-RDPAndRemoteAccess {
-    param([ref]$Results)
-    try {
-        # Check if RDP is allowed
-        $fdeny = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -ErrorAction SilentlyContinue
-        $rdpEnabled = if ($fdeny -ne $null) { ($fdeny.fDenyTSConnections -eq 0) } else { $false }
-        Add-Result -Results $Results -Name "RDP Enabled" -Result ($rdpEnabled ? "TRUE" : "FALSE") -Level ($rdpEnabled ? "PASS" : "FAIL")
-
-        # Check firewall rules related to Remote Desktop
-        $rdpRules = Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-        if ($rdpRules) {
-            $enabledRules = $rdpRules | Where-Object { $_.Enabled -eq 'True' }
-            $rulesStr = $rdpRules | Select-Object DisplayName,Enabled,Direction,Action | Format-Table -AutoSize | Out-String
-            Add-Result -Results $Results -Name "RDP Firewall Rules" -Result "INFO - See details" -Level "INFO"
-            Add-Result -Results $Results -Name "RDPFirewallDetail" -Result $rulesStr -Level "INFO"
-            $rulePass = if ($enabledRules.Count -gt 0) { "PASS - Remote Desktop firewall rules enabled" } else { "WARN - Remote Desktop firewall rules not enabled" }
-            Add-Result -Results $Results -Name "RDP Firewall Status" -Result $rulePass -Level ($enabledRules.Count -gt 0 ? "PASS" : "WARN")
+        $usb = Get-PnpDevice -Class USB -ErrorAction SilentlyContinue
+        if ($usb) {
+            $usbList = $usb | Select-Object Status, Class, FriendlyName | Out-String
+            Add-Result -Results $Results -Name "USB Ports" -Result $usbList.Trim()
         } else {
-            Add-Result -Results $Results -Name "RDP Firewall Rules" -Result "None found / display group not present. Check firewall rules manually." -Level "WARN"
+            Add-Result -Results $Results -Name "USB Ports" -Result "PASS - No USB devices active"
         }
-
-        # List groups allowed remote access (Local 'Remote Desktop Users' group)
-        try {
-            $remoteGroupMembers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction Stop | Select-Object Name,ObjectClass
-            $membersStr = $remoteGroupMembers | ForEach-Object { "$($_.Name) [$($_.ObjectClass)]" } -join "; "
-            Add-Result -Results $Results -Name "Remote Desktop Allowed Accounts" -Result ($membersStr -ne "" ? $membersStr : "None") -Level "INFO"
-        } catch {
-            Add-Result -Results $Results -Name "Remote Desktop Allowed Accounts" -Result "None or unable to enumerate" -Level "INFO"
-        }
-
     } catch {
-        Add-Result -Results $Results -Name "RDP & Remote Access" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "USB Ports" -Result "ERROR - $_"
     }
 }
 
-function Check-RequiredSoftware {
-    param(
+function Check-Telegraf {
+    param ([ref]$Results)
+    try {
+        $service = Get-Service -Name "telegraf" -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq "Running") {
+            Add-Result -Results $Results -Name "Telegraf Agent" -Result "PASS - Telegraf running"
+        } else {
+            Add-Result -Results $Results -Name "Telegraf Agent" -Result "FAIL - Telegraf not running"
+        }
+    } catch {
+        Add-Result -Results $Results -Name "Telegraf Agent" -Result "ERROR - $_"
+    }
+}
+
+function Check-Patches {
+    param ([ref]$Results)
+    try {
+        $patches = Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 10 HotFixID, InstalledOn | Out-String
+        Add-Result -Results $Results -Name "Last 10 Patches" -Result $patches.Trim()
+    } catch {
+        Add-Result -Results $Results -Name "Last 10 Patches" -Result "ERROR - $_"
+    }
+}
+
+function Check-Firewall {
+    param ([ref]$Results)
+    try {
+        $profiles = Get-NetFirewallProfile
+        $disabled = $profiles | Where-Object { $_.Enabled -eq $false }
+        if ($disabled) {
+            $list = $disabled | Select-Object Name, Enabled | Out-String
+            Add-Result -Results $Results -Name "Firewall Status" -Result "FAIL - Disabled profiles:`n$list"
+        } else {
+            Add-Result -Results $Results -Name "Firewall Status" -Result "PASS - All profiles enabled"
+        }
+    } catch {
+        Add-Result -Results $Results -Name "Firewall Status" -Result "ERROR - $_"
+    }
+}
+
+function Check-BIOS {
+    param ([ref]$Results)
+    try {
+        $bios = Get-WmiObject Win32_BIOS | Select-Object * | Out-String
+        Add-Result -Results $Results -Name "BIOS Settings" -Result $bios.Trim()
+    } catch {
+        Add-Result -Results $Results -Name "BIOS Settings" -Result "ERROR - $_"
+    }
+}
+
+function Check-RDP {
+    param ([ref]$Results)
+    try {
+        $rdpEnabled = (Get-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server").fDenyTSConnections -eq 0
+        $firewall = Get-NetFirewallRule -DisplayGroup "Remote Desktop" | Where-Object { $_.Enabled -eq "True" }
+        $users = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue | Out-String
+
+        $status = if ($rdpEnabled) { "Enabled" } else { "Disabled" }
+        Add-Result -Results $Results -Name "RDP Status" -Result $status
+        Add-Result -Results $Results -Name "RDP Firewall Rules" -Result ($firewall | Select-Object DisplayName, Enabled | Out-String).Trim()
+        Add-Result -Results $Results -Name "RDP Allowed Users" -Result $users.Trim()
+    } catch {
+        Add-Result -Results $Results -Name "RDP Status" -Result "ERROR - $_"
+    }
+}
+
+function Check-Software {
+    param (
         [ref]$Results,
-        [string[]]$RequiredSoftware = @()
+        [string[]]$ExpectedSoftware
     )
     try {
-        # Build registry list of installed programs (x86 & x64)
-        $uninstallPaths = @(
-            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
-        )
+        $installed = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* ,
+                                    HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* `
+                        | Select-Object DisplayName | Where-Object { $_.DisplayName } | Select-Object -ExpandProperty DisplayName
 
-        $installed = @()
-        foreach ($p in $uninstallPaths) {
-            try {
-                $installed += Get-ItemProperty -Path $p -ErrorAction SilentlyContinue | Select-Object DisplayName,DisplayVersion,Publisher,InstallDate
-            } catch {}
-        }
-
-        $installedNames = $installed | Where-Object { $_.DisplayName } | ForEach-Object { $_.DisplayName } | Sort-Object -Unique
-
-        $report = @()
-        foreach ($req in $RequiredSoftware) {
-            $found = $installed | Where-Object { $_.DisplayName -and ($_.DisplayName -like "*$req*") } 
-            if ($found) {
-                $report += [PSCustomObject]@{ Software=$req; Status="Installed"; Detail = (($found | Select-Object -First 1 DisplayName, DisplayVersion, Publisher) | Out-String).Trim() }
-                Add-Result -Results $Results -Name "Software:$req" -Result "PASS - Installed" -Level "PASS"
+        foreach ($app in $ExpectedSoftware) {
+            if ($installed -contains $app) {
+                Add-Result -Results $Results -Name "Software Check - $app" -Result "PASS - Installed"
             } else {
-                $report += [PSCustomObject]@{ Software=$req; Status="MISSING"; Detail = "" }
-                Add-Result -Results $Results -Name "Software:$req" -Result "FAIL - Not installed" -Level "FAIL"
+                Add-Result -Results $Results -Name "Software Check - $app" -Result "FAIL - Not Installed"
             }
         }
-
-        if ($report.Count -gt 0) {
-            Add-Result -Results $Results -Name "RequiredSoftwareDetail" -Result (($report | Format-Table -AutoSize) -join "`n") -Level "INFO"
-        }
-
     } catch {
-        Add-Result -Results $Results -Name "Required Software" -Result "ERROR - $_" -Level "ERROR"
+        Add-Result -Results $Results -Name "Software Validation" -Result "ERROR - $_"
     }
 }
 
-# ---------- Runner ----------
-param (
-    [string[]]$ExpectedGPOs = @("GPO1","GPO2"),
-    [string[]]$RequiredSoftware = @(),
-    [string[]]$ExcludedServices = @("edgeupdate"),
-    [string]$OutCsv = ".\OS-BuildValidationResults.csv",
-    [string]$OutDetails = ".\OS-BuildValidationDetails.txt"
-)
+# ------------------ Script Execution ------------------
 
-# Create results array
-$results = @()
-$ResultsRef = [ref]$results
+$Results = @()
 
-# Run checks
-Get-DomainJoin -Results $ResultsRef
-Check-GPOs -Results $ResultsRef -ExpectedGPOs $ExpectedGPOs
-Check-DriversAndHardware -Results $ResultsRef
-List-LocalAccounts -Results $ResultsRef
-List-LocalGroupsWithMembers -Results $ResultsRef
-Check-BitLocker -Results $ResultsRef
-Check-USBLockdown -Results $ResultsRef
-Check-TelegrafAgent -Results $ResultsRef
-Get-LastInstalledPatches -Results $ResultsRef -Count 10
-Check-WindowsFirewall -Results $ResultsRef
-Get-BIOSInfo -Results $ResultsRef
-Check-RDPAndRemoteAccess -Results $ResultsRef
-Check-RequiredSoftware -Results $ResultsRef -RequiredSoftware $RequiredSoftware
+Check-Domain -Results ([ref]$Results)
+write-host "Check Domain" -ForegroundColor Green
+Check-GPOs -Results ([ref]$Results)
+write-host "Check GPOs" -ForegroundColor Green
+Check-Drivers -Results ([ref]$Results)
+write-host "Check Drivers" -ForegroundColor Green
+Check-LocalAccounts -Results ([ref]$Results)
+write-host "Check Local Accounts" -ForegroundColor Green
+Check-LocalGroups -Results ([ref]$Results)
+write-host "Check Local Groups" -ForegroundColor Green
+Check-Bitlocker -Results ([ref]$Results)
+write-host "Check Bitlocker" -ForegroundColor Green
+Check-USBPorts -Results ([ref]$Results)
+write-host "Check USB Ports" -ForegroundColor Green
+Check-Telegraf -Results ([ref]$Results)
+write-host "Check Telegraf Agent" -ForegroundColor Green
+Check-Patches -Results ([ref]$Results)
+write-host "Check Patches" -ForegroundColor Green
+Check-Firewall -Results ([ref]$Results)
+write-host "Check Firewall" -ForegroundColor Green
+Check-BIOS -Results ([ref]$Results)
+write-host "Check BIOS settings" -ForegroundColor Green
+Check-RDP -Results ([ref]$Results)
+write-host "Check RDP" -ForegroundColor Green
+Check-Software -Results ([ref]$Results) -ExpectedSoftware $ExpectedSoftware
+write-host "Check Software" -ForegroundColor Green
+write-host "Script Complete" -ForegroundColor Green
 
-# Export CSV of primary summary lines (Name, Result, Level, Timestamp)
-try {
-    $summary = $results | Select-Object Timestamp, Name, Result, Level
-    $summary | Export-Csv -Path $OutCsv -NoTypeInformation -Force
-    Write-Host "Summary CSV written to $OutCsv"
-} catch {
-    Write-Warning "Failed to write CSV: $_"
-}
+# ------------------ Export Results ------------------
 
-# Write details file (all records with long Result lines)
-try {
-    $sb = New-Object System.Text.StringBuilder
-    $sb.AppendLine("OS Build Validation - Details") | Out-Null
-    foreach ($r in $results) {
-        $sb.AppendLine("-----") | Out-Null
-        $sb.AppendLine("Timestamp: $($r.Timestamp)") | Out-Null
-        $sb.AppendLine("Name: $($r.Name)") | Out-Null
-        $sb.AppendLine("Level: $($r.Level)") | Out-Null
-        $sb.AppendLine("Result:") | Out-Null
-        $sb.AppendLine($r.Result) | Out-Null
-    }
-    $sb.ToString() | Out-File -FilePath $OutDetails -Force -Encoding UTF8
-    Write-Host "Details written to $OutDetails"
-} catch {
-    Write-Warning "Failed to write details file: $_"
-}
+$Results | Export-Csv -Path $csvPath -NoTypeInformation -Force
 
-# Final console summary
-$pass = $results | Where-Object { $_.Level -eq "PASS" } | Measure-Object | Select-Object -ExpandProperty Count
-$fail = $results | Where-Object { $_.Level -eq "FAIL" } | Measure-Object | Select-Object -ExpandProperty Count
-$warn = $results | Where-Object { $_.Level -eq "WARN" } | Measure-Object | Select-Object -ExpandProperty Count
-$info = $results | Where-Object { $_.Level -eq "INFO" } | Measure-Object | Select-Object -ExpandProperty Count
-Write-Host "`nValidation complete. PASS: $pass, FAIL: $fail, WARN: $warn, INFO: $info"
+Write-Host "Validation complete. Results exported to $csvPath"
