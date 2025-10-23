@@ -1,12 +1,13 @@
-# ===============================
-# UAT Script for Windows Server 2022
-# ===============================
+# ================================================#
+# Version: 2.0                                    #
+# Author: Tony Reardon                            #
+# UAT Script for Windows Server 2022 & Windows 11 #
+# ================================================#
 
 # --- Define expected values ---
-$ExpectedDNS = @("192.168.1.10", "192.168.1.11")
 $ExpectedCDriveSizeGB = 59
 $MinFreeSpacePercent = 10
-$OutputPath = ".\UAT_Results_$env:USERNAME.csv"
+$OutputPath = "C:\Temp\UAT_Results_$env:COMPUTERNAME.csv" # <------ Change this
 
 # --- Helper to record results ---
 function Add-Result {
@@ -24,66 +25,65 @@ function Add-Result {
 # --- UAT Checks ---
 function Check-DNSConfig {
     param ([ref]$Results)
-
     try {
-        # Define per-site DNS expectations
-        $DC1_DNSServers = @("10.0.0.1", "10.0.0.2")
-        $DC2_DNSServers = @("10.0.0.2", "10.0.0.1")
+        #Define Per-Site DNS Config. DC1 = SDC, DC2 = WDC
+        $DC1_DNSServers = @("192.168.178.1", "192.168.178.2")
+        $DC2_DNSServers = @("192.168.178.2", "192.168.178.1")
 
-        # Get interface alias (excluding Loopback etc.)
-        $InterfaceAlias = Get-DnsClient | Where-Object { $_.InterfaceAlias -notlike "Loopback*" } |
-                          Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceAlias
-
-        # Get current DNS config
-        $current = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4).ServerAddresses
+        $InterfaceAlias = Get-DnsClient | Where-Object {$_.InterfaceAlias -notlike "Loopback*"} | 
+                            Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty InterfaceAlias
+        
+        #Get current config
+        $current = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceAlias $InterfaceAlias).ServerAddresses
         $expected = $null
-        $ADSite = "Unknown"
+        $ADsite = "Unknown"
 
-        # Compare function
+        #Compare
         function Compare-DnsOrder {
             param ($current, $expected)
-            if ($current.Count -ne $expected.Count) { return $false }
+            if ($current.Count -ne $expected.Count) {return $false}
             for ($i = 0; $i -lt $expected.Count; $i++) {
-                if ($current[$i] -ne $expected[$i]) { return $false }
+                if ($current[$i] -ne $expected[$i]) {return $false}
             }
             return $true
         }
 
-        # Detect mismatch
-        $currentString = $current -join ", "
+        #detecht mismatch 
+        $currentString = $current -Join ", "
         $ADSite = ([System.DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite()).Name
         switch ($ADSite) {
-            "DC2" { $expected = $DC2_DNSServers }
-            default { $expected = $DC1_DNSServers }
+            "WDC-SEN" {$expected = $DC2_DNSServers}
+            default {$expected = $DC1_DNSServers}
         }
         $expectedString = $expected -join ", "
 
         $isCorrect = Compare-DnsOrder -current $current -expected $expected
 
-        if ($isCorrect) {
-            Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS matches expected order: $expectedString"
+
+        if ($isCorrect) { 
+            Add-Result -Results $Results -Name "DNS Configuration" -Result "Pass - DNS matches expected order: $expectedString"
         } else {
-            # Attempt auto-fix
+            #Attempt remediation 
             try {
                 Set-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -ServerAddresses $expected -ErrorAction Stop
-                Start-Sleep -Seconds 2  # Give it a moment to apply
-                $updated = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4).ServerAddresses
-                $isNowCorrect = Compare-DnsOrder -current $updated -expected $expected
+                Start-Sleep -Seconds 2 #Wait for it to apply
+                $updated = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceAlias $InterfaceAlias).ServerAddresses
+                $isNowCorrect = Compare-DnsOrder -current $current -expected $expected
 
                 if ($isNowCorrect) {
-                    Add-Result -Results $Results -Name "DNS Configuration" -Result "PASS - DNS updated to: $expectedString"
-                } else {
-                    Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - DNS mismatch after attempted fix. Expected: $expectedString | Found: $($updated -join ', ')"
+                    Add-Result -Results $Results -Name "DNS Configuration" -Result "Pass - DNS updated to: $expectedString"
+                } else { 
+                    Add-Result -Results $Results -Name "DNS Configuration" -Result "Fail - DNS mismatch after attempted fix. Expected: $expectedString | Found: $($update -join ', ')"
                 }
             } catch {
-                Add-Result -Results $Results -Name "DNS Configuration" -Result "FAIL - Failed to update DNS: $_"
+                Add-Result -Results $Results -Name "DNS Configuration" -Result "Fail - Failed to update DNS: $_"
             }
         }
 
-    } catch {
-        Add-Result -Results $Results -Name "DNS Configuration" -Result "ERROR - $_"
+            } catch {
+                Add-Result -Results $Results -Name "DNS Configuration" -Result "Error - $_"
+            }
     }
-}
 
 function Check-CDrive {
     param ($ExpectedSize, $MinFreePercent, [ref]$Results)
@@ -111,11 +111,11 @@ function Check-CDrive {
 function Check-SyslogSetup {
     param ([ref]$Results)
     try {
-        $logInsight = Get-Service -Name "VMwareLogCollector" -ErrorAction SilentlyContinue
+        $logInsight = Get-Service -Name "LogInsightAgentService" -ErrorAction SilentlyContinue
         if ($logInsight) {
-            Add-Result -Results $Results -Name "Aria Log Insight Agent" -Result "PASS - Installed"
+            Add-Result -Results $Results -Name "Aria Operations for logs agent" -Result "PASS - Installed"
         } else {
-            Add-Result -Results $Results -Name "Aria Log Insight Agent" -Result "FAIL - Not Installed"
+            Add-Result -Results $Results -Name "Aria Operations for logs agent" -Result "FAIL - Not Installed"
         }
 
         $eventForwarding = wevtutil gl "ForwardedEvents" 2>&1
@@ -123,6 +123,20 @@ function Check-SyslogSetup {
     } catch {
         Add-Result -Results $Results -Name "Syslog Setup" -Result "ERROR - $_"
     }
+}
+
+function Check-NTP {
+    param ([ref]$Results)
+    try {
+        $NTPServer = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters").Ntpserver
+        if ([String]::IsNullOrWhiteSpace($NTPServer)) {
+            Add-Result -Results $Results -Name "Time Syncronization" -Result "Fail - No NTP Configured"
+        } else {
+            Add-Result -Results $Results -Name "Time Syncronization" -Result "Pass - NTP Configured - Server List: $NTPServer"
+            }
+       } catch {
+        Add-Result -Results $Results -Name "Time Syncronization" -Result "ERROR - $_"
+       }
 }
 
 function Check-Network {
@@ -150,22 +164,21 @@ function Check-GPOs {
     param (
         [ref]$Results
     )
-
     try {
-        # Detect OS
+        # OS Type
         $osInfo = Get-CimInstance Win32_OperatingSystem
         $caption = $osInfo.Caption
 
-        # Define expected GPOs per OS
-        $Windows11GPOs = @("Win11-GPO1", "Win11-GPO2")
-        $WindowsServerGPOs = @("Server-GPO1", "Server-GPO2")
+        # Expected GPO
+        $Win11GPOs = @("Win-GPO1", "Win-GPO2")
+        $Svr22GPOs = @("SVR-GPO1", "SVR-GPO2", "SVR-GPO3")
 
-        if ($caption -match "Windows 11") {
-            $ExpectedGPOs = $Windows11GPOs
+        if ($caption -like "*Windows 11*"){
+            $ExpectedGPOs = $Win11GPOs
             $osType = "Windows 11"
-        } elseif ($caption -match "Windows Server") {
-            $ExpectedGPOs = $WindowsServerGPOs
-            $osType = "Windows Server"
+        } elseif ($caption -Match "Microsoft Windows Server 2022"){
+            $ExpectedGPOs = $Svr22GPOs
+            $osType = "Microsoft Windows Server 2022"
         } else {
             $ExpectedGPOs = @()
             $osType = "Unknown OS"
@@ -173,10 +186,10 @@ function Check-GPOs {
 
         Add-Result -Results $Results -Name "Detected OS" -Result $osType
 
-        # Run gpresult to gather applied GPOs
+        # Gather applied GPOs 
         $gpoOutput = gpresult /r /scope:computer 2>&1
 
-        # Extract applied GPOs
+         # Extract applied GPOs from the output
         $appliedGPOs = @()
         $start = $false
         foreach ($line in $gpoOutput) {
@@ -184,7 +197,7 @@ function Check-GPOs {
                 $start = $true
                 continue
             }
-            if ($start -and ($line -match "^\S")) { break }
+            if ($start -and ($line -match "^\S")) { break }  # Stop at next heading
             if ($start -and $line.Trim()) {
                 $appliedGPOs += $line.Trim()
             }
@@ -193,21 +206,21 @@ function Check-GPOs {
         $appliedList = $appliedGPOs -join ", "
         Add-Result -Results $Results -Name "Applied GPOs" -Result $appliedList
 
-        # Check for expected GPOs
-        if ($ExpectedGPOs.Count -gt 0) {
-            $missing = $ExpectedGPOs | Where-Object { $_ -notin $appliedGPOs }
-            if ($missing.Count -eq 0) {
-                Add-Result -Results $Results -Name "GPO Validation" -Result "PASS - All expected GPOs applied: $($ExpectedGPOs -join ', ')"
+        #Check for Expexted GPOs
+        if ($ExpectedGPOs.Count -gt 0){
+            $missing = $ExpectedGPOs | Where-Object {$_ -notin $appliedGPOs}
+            if ($missing.Count -eq 0){
+                Add-Result -Results $Results -Name "GPO Validation" -Result "Pass - All expected GPOs applied: $($ExpectedGPOs -join ',')"
+                } else {
+                    Add-Result -Results $Results -Name "GPO Validation" -Result "Fail - Missing GPOs: $($missing -join ',')"
+                }
             } else {
-                Add-Result -Results $Results -Name "GPO Validation" -Result "FAIL - Missing GPOs: $($missing -join ', ')"
+                Add-Result -Results $Results -Name "GPO Validation" -Result "Warning - No expected GPOs defined for $osType"
             }
-        } else {
-            Add-Result -Results $Results -Name "GPO Validation" -Result "WARNING - No expected GPOs defined for $osType"
-        }
 
-        # Capture computer group membership
+        # Get computer group membership
         $groups = @()
-        $groupStart = $false
+        $groupStart = $false        
         foreach ($line in $gpoOutput) {
             if ($line -match "The computer is a part of the following security groups") {
                 $groupStart = $true
@@ -227,10 +240,21 @@ function Check-GPOs {
     }
 }
 
+function Check-AdminGroup {
+    param ([ref]$Results)
+    try {
+        $admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction Stop
+        $adminNames = $admins.Name -join ", "
+        Add-Result -Results $Results -Name "Local Admin Group Members" -Result $adminNames
+    } catch {
+        Add-Result -Results $Results -Name "Local Admin Group Members" -Result "ERROR - $_"
+    }
+}
+
 function Check-GuestAccount {
     param ([ref]$Results)
     try {
-        $guest = Get-LocalUser -Name "Guest"
+        $guest = Get-LocalUser -Name "Guest" -ErrorAction SilentlyContinue
         $result = if ($guest.Enabled) { "FAIL - Enabled" } else { "PASS - Disabled" }
         Add-Result -Results $Results -Name "Guest Account Status" -Result $result
     } catch {
@@ -241,26 +265,25 @@ function Check-GuestAccount {
 function Check-WindowsServices {
     param (
         [ref]$Results,
-        [string[]]$ExcludedServices = @("edgeupdate")  # Default excluded services
-    )
+        [string[]]$ExcludedServices = @("edgeupdate","GoogleUpdater","RemoteRegistry","sppsvc","DoSVC","omn-instantclone-ga","wuauserv")) #<------------------Edit
     try {
         $allServices = Get-Service
         $autoServices = $allServices | Where-Object { $_.StartType -eq 'Automatic' }
 
-        # Exclude services if defined
-        $filteredServices = $autoServices | Where-Object { $_.Name -notin $ExcludedServices }
-        # Find stopped auto services
+        #Exlude filtered
+        $filteredServices = $autoServices | Where-Object {$_.Name -notin $ExcludedServices}
+        #Stopped Auto
         $stoppedAuto = $filteredServices | Where-Object { $_.Status -ne 'Running' }
 
         if ($stoppedAuto.Count -eq 0) {
-            Add-Result -Results $Results -Name "Windows Services Status" -Result "PASS - All automatic services (excluding exclusions) are running"
+            Add-Result -Results $Results -Name "Windows Services Status" -Result "PASS - All automatic services are running. Excluding $ExcludedServices"
         } else {
             $failedList = $stoppedAuto | Select-Object Name, DisplayName, Status | Out-String
             Add-Result -Results $Results -Name "Windows Services Status" -Result "FAIL - Some automatic services are not running"
             Add-Result -Results $Results -Name "Stopped Auto Services" -Result $failedList.Trim()
         }
 
-        # Info: running services
+        #all currently running services for info
         $runningSummary = $allServices | Where-Object { $_.Status -eq "Running" } |
                           Select-Object StartType, Status, Name, DisplayName | Out-String
         Add-Result -Results $Results -Name "Running Services Summary" -Result $runningSummary.Trim()
@@ -329,12 +352,14 @@ function Check-DomainJoin {
     }
 }
 
+
 function Check-ResourceUsage {
     param ([ref]$Results)
 
     try {
-        $sampleCount = 6        # Use 60 for full hour
-        $sampleInterval = 10    # Use 60 for once per minute
+        # Use shorter time for testing (6 samples every 10 seconds = 1 minute)
+        $sampleCount = 12        # Total Samples to collect                         <------ Change this
+        $sampleInterval = 1    # Seconds per sample                                 <------ Change this
 
         $counters = @(
             '\Processor(_Total)\% Processor Time',
@@ -347,43 +372,45 @@ function Check-ResourceUsage {
 
         $data = Get-Counter -Counter $counters -SampleInterval $sampleInterval -MaxSamples $sampleCount
 
-        # CPU and Memory
-        $coreCount = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
-        $cpuSamples = $data.CounterSamples | Where-Object { $_.InstanceName -ieq '_Total' -and $_.Path -like '*% Processor Time' } | Select-Object -ExpandProperty CookedValue
-        $memSamples = $data.CounterSamples | Where-Object { $_.Path -like '*\Memory\% Committed Bytes In Use' } | Select-Object -ExpandProperty CookedValue
+       #CPU and Memory
+    $coreCount = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+    $cpusamples = $data.CounterSamples | Where-Object {$_.InstanceName -ieq '_Total' -and $_.Path -like '*% Processor Time'} | Select-Object -ExpandProperty CookedValue
+    $memsamples = $data.CounterSamples | Where-Object {$_.Path -like '*\Memory\% Committed Bytes In Use'} | Select-Object -ExpandProperty CookedValue
 
-        $cpuAvg = [math]::Round((($cpuSamples | Measure-Object -Average).Average * 100) / $coreCount, 2)
-        $cpuPeak = [math]::Round((($cpuSamples | Measure-Object -Maximum).Maximum * 100) / $coreCount, 2)
-        $memAvg = [math]::Round(($memSamples | Measure-Object -Average).Average, 2)
-        $memPeak = [math]::Round(($memSamples | Measure-Object -Maximum).Maximum, 2)
+    $cpuAvg = [math]::Round((($cpusamples | Measure-Object -Average).Average *100) /$coreCount, 2)
+    $cpuPeak = [math]::Round((($cpusamples | Measure-Object -Maximum).Maximum *100) /$coreCount, 2)
+    
+    $memAvg = [math]::Round(($memsamples | Measure-Object -Average).Average, 2)
+    $memPeak = [math]::Round(($memsamples | Measure-Object -Maximum).Maximum, 2)
 
-        # Helper for disk and network
-        function Get-AvgPeak {
+        function Get-AvgPeakByPattern {
             param ($pattern)
             $samples = $data.CounterSamples | Where-Object { $_.Path -like "*$pattern*" } | Select-Object -ExpandProperty CookedValue
             if (-not $samples -or $samples.Count -eq 0) {
                 return @{ Avg = 0; Peak = 0 }
             }
             return @{
-                Avg  = [math]::Round(($samples | Measure-Object -Average).Average / 1KB, 2)
-                Peak = [math]::Round(($samples | Measure-Object -Maximum).Maximum / 1KB, 2)
+                Avg = [math]::Round(($samples | Measure-Object -Average).Average, 2)
+                Peak = [math]::Round(($samples | Measure-Object -Maximum).Maximum, 2)
             }
         }
 
-        $diskRead  = Get-AvgPeak 'Disk Read Bytes/sec'
-        $diskWrite = Get-AvgPeak 'Disk Write Bytes/sec'
-        $netIn     = Get-AvgPeak 'Bytes Received/sec'
-        $netOut    = Get-AvgPeak 'Bytes Sent/sec'
+        $diskRead  = Get-AvgPeakByPattern 'Disk Read Bytes/sec'
+        $diskWrite = Get-AvgPeakByPattern 'Disk Write Bytes/sec'
+        $netIn     = Get-AvgPeakByPattern 'Bytes Received/sec'
+        $netOut    = Get-AvgPeakByPattern 'Bytes Sent/sec'
 
+        # Build human-readable summary
         $summary = @(
             "CPU: Avg ${cpuAvg}%, Peak ${cpuPeak}%",
             "Memory: Avg ${memAvg}%, Peak ${memPeak}%",
-            "Disk Read: Avg $($diskRead.Avg) KB/s, Peak $($diskRead.Peak) KB/s",
-            "Disk Write: Avg $($diskWrite.Avg) KB/s, Peak $($diskWrite.Peak) KB/s",
-            "Network In: Avg $($netIn.Avg) KB/s, Peak $($netIn.Peak) KB/s",
-            "Network Out: Avg $($netOut.Avg) KB/s, Peak $($netOut.Peak) KB/s"
+            "Disk Read: Avg $([math]::Round($diskRead.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskRead.Peak / 1KB, 2)) KB/s",
+            "Disk Write: Avg $([math]::Round($diskWrite.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($diskWrite.Peak / 1KB, 2)) KB/s",
+            "Network In: Avg $([math]::Round($netIn.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netIn.Peak / 1KB, 2)) KB/s",
+            "Network Out: Avg $([math]::Round($netOut.Avg / 1KB, 2)) KB/s, Peak $([math]::Round($netOut.Peak / 1KB, 2)) KB/s"
         ) -join " | "
 
+        # Check thresholds
         if ($cpuAvg -gt 85 -or $memAvg -gt 85) {
             Add-Result -Results $Results -Name "Resource Usage" -Result "FAIL - High CPU or Memory. $summary"
         } else {
@@ -400,20 +427,50 @@ function Run-UAT {
     $Results = @()
 
     Check-DNSConfig -ExpectedDNS $ExpectedDNS -Results ([ref]$Results)
+    Write-Host "DNS Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
+    Check-NTP -Results ([ref]$Results)
+    Write-Host "NTP Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-CDrive -ExpectedSize $ExpectedCDriveSizeGB -MinFreePercent $MinFreeSpacePercent -Results ([ref]$Results)
+    Write-Host "Disk Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-SyslogSetup -Results ([ref]$Results)
+    Write-Host "Syslog Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-Network -Results ([ref]$Results)
+    Write-Host "Network Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-GPOs -Results ([ref]$Results)
+    Write-Host "GPO Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-AdminGroup -Results ([ref]$Results)
+    Write-Host "Administrator Group Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-GuestAccount -Results ([ref]$Results)
+    Write-Host "Guest Account Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-WindowsServices -Results ([ref]$Results)
+    Write-Host "Windows Services Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-RDP -Results ([ref]$Results)
+    Write-Host "RDP Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-WindowsUpdates -Results ([ref]$Results)
+    Write-Host "Windows Update Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
+    Write-Host "Starting Windows Defender Scan" -ForegroundColor Yellow
     Run-WindowsDefenderScan -Results ([ref]$Results)
+    Write-Host "Windows Defender Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
     Check-DomainJoin -Results ([ref]$Results)
+    Write-Host "Domain Join Check Complete" -ForegroundColor Green
+    Start-Sleep -Seconds 2
+    Write-Host "1 Hour Resource Monitoring.... Please wait" -ForegroundColor Yellow
     Check-ResourceUsage -Results ([ref]$Results)
+    Write-Host "Resource Monitor Check Complete" -ForegroundColor Green
 
-    $Results | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8
+    $Results | Export-Csv -Path $OutputPath -NoTypeInformation -Encoding UTF8 -Force
     Write-Host "UAT completed. Results saved to: $OutputPath"
 }
 
