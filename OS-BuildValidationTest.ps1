@@ -128,15 +128,23 @@ function Check-SyslogSetup {
 function Check-NTP {
     param ([ref]$Results)
     try {
-        $NTPServer = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters").Ntpserver
-        if ([String]::IsNullOrWhiteSpace($NTPServer)) {
-            Add-Result -Results $Results -Name "Time Syncronization" -Result "Fail - No NTP Configured"
-        } else {
-            Add-Result -Results $Results -Name "Time Syncronization" -Result "Pass - NTP Configured - Server List: $NTPServer"
+        # Query w32tm for configuration
+        $w32tmOutput = w32tm /query /configuration 2>$null
+        if ($w32tmOutput) {
+            # Extract the NtpServer line
+            $ntpLine = $w32tmOutput | Where-Object { $_ -match "NtpServer" }
+            if ($ntpLine) {
+                $NTPServer = ($ntpLine -split ":")[1].Trim()
             }
-       } catch {
-        Add-Result -Results $Results -Name "Time Syncronization" -Result "ERROR - $_"
-       }
+        }
+        if ([string]::IsNullOrWhiteSpace($NTPServer)) {
+            Add-Result -Results $Results -Name "Time Synchronization" -Result "Fail - No NTP Configured"
+        } else {
+            Add-Result -Results $Results -Name "Time Synchronization" -Result "Pass - NTP Configured - Server List: $NTPServer"
+        }
+    } catch {
+        Add-Result -Results $Results -Name "Time Synchronization" -Result "ERROR - $_"
+    }
 }
 
 function Check-Network {
